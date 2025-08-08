@@ -63,6 +63,12 @@ void Error_Handler(void);
 #define SPI1_IRQ_EXTI_IRQn EXTI0_IRQn
 #define BLE_NRST_Pin GPIO_PIN_1
 #define BLE_NRST_GPIO_Port GPIOA
+#define FDCAN_FAULT_Pin GPIO_PIN_2
+#define FDCAN_FAULT_GPIO_Port GPIOA
+#define FDCAN_SILENT_Pin GPIO_PIN_3
+#define FDCAN_SILENT_GPIO_Port GPIOA
+#define HWCONF0_Pin GPIO_PIN_4
+#define HWCONF0_GPIO_Port GPIOA
 #define STATUS_LED_1_Pin GPIO_PIN_5
 #define STATUS_LED_1_GPIO_Port GPIOA
 #define USB_REG_OUT_Pin GPIO_PIN_6
@@ -71,6 +77,8 @@ void Error_Handler(void);
 #define CAN_REG_OUT_GPIO_Port GPIOA
 #define STATUS_LED_2_Pin GPIO_PIN_0
 #define STATUS_LED_2_GPIO_Port GPIOB
+#define HWCONF1_Pin GPIO_PIN_8
+#define HWCONF1_GPIO_Port GPIOA
 #define SPI1_CS_Pin GPIO_PIN_15
 #define SPI1_CS_GPIO_Port GPIOA
 #define USB_REG_ST_Pin GPIO_PIN_6
