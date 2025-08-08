@@ -1,0 +1,9 @@
+TX Power Settings:
+	 0: -14 dBm
+	 1: -11 dBm
+	 2: -8 dBm
+	 3: -5 dBm
+	 4: -2 dBm
+	 5: 2 dBm
+	 6: 4 dBm
+	 7: 8 dBm
