@@ -83,6 +83,8 @@ tBleStatus ServiceStatus_CharacteristicPower_Add() {
 		goto fail;
 
 	ServiceStatus_CharacteristicPower_Update();
+
+	PRINT_DBG("ServiceStatus_CharacteristicPower_Add() success, handle %02x\r\n", Handle_Char_Status_Power);
 	return BLE_STATUS_SUCCESS;
 
 	fail: return BLE_STATUS_ERROR;

@@ -42,6 +42,8 @@ tBleStatus ServiceDeviceInformation_CharacteristicManufacturerName_Add() {
 		goto fail;
 
 	ServiceDeviceInformation_CharacteristicManufacturerName_Update();
+
+	PRINT_DBG("ServiceDeviceInformation_CharacteristicManufacturerName_Add() success, handle %02x\r\n", Handle_Char_DeviceInformation_ManufacturerName);
 	return BLE_STATUS_SUCCESS;
 
 	fail: return BLE_STATUS_ERROR;

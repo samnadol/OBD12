@@ -65,6 +65,7 @@ void Error_Handler(void);
 #define BLE_NRST_GPIO_Port GPIOA
 #define FDCAN_FAULT_Pin GPIO_PIN_2
 #define FDCAN_FAULT_GPIO_Port GPIOA
+#define FDCAN_FAULT_EXTI_IRQn EXTI2_IRQn
 #define FDCAN_SILENT_Pin GPIO_PIN_3
 #define FDCAN_SILENT_GPIO_Port GPIOA
 #define HWCONF0_Pin GPIO_PIN_4

@@ -23,6 +23,7 @@ tBleStatus ServiceCommand_Add(void) {
 	if (ret != BLE_STATUS_SUCCESS)
 		goto fail;
 
+	PRINT_DBG("ServiceCommand_Add() success, handle %02x\r\n", Handle_Serv_Command);
 	ServiceCommand_CharacteristicWrite_Add();
 
 	return BLE_STATUS_SUCCESS;

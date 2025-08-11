@@ -23,6 +23,7 @@ tBleStatus ServiceDeviceInformation_Add(void) {
 	if (ret != BLE_STATUS_SUCCESS)
 		goto fail;
 
+	PRINT_DBG("ServiceDeviceInformation_Add() success, handle %02x\r\n", Handle_Serv_DeviceInformation);
 	ServiceDeviceInformation_CharacteristicManufacturerName_Add();
 	ServiceDeviceInformation_CharacteristicModelNumber_Add();
 

@@ -5,10 +5,11 @@
  *      Author: samna
  */
 
-#include <BLE/BLE_Device.h>
-#include <BLE/BLE_Services/Command.h>
-#include <BLE/BLE_Services/DeviceInformation.h>
-#include <BLE/BLE_Services/Status.h>
+#include "BLE/BLE_Device.h"
+#include "BLE/BLE_Services/Command.h"
+#include "BLE/BLE_Services/DeviceInformation.h"
+#include "BLE/BLE_Services/Status.h"
+
 #include "bluenrg1_aci.h"
 #include "bluenrg1_hci_le.h"
 
@@ -38,7 +39,7 @@ uint8_t BLE_Device_Init(void) {
 	uint16_t service_handle, dev_name_char_handle, appearance_char_handle;
 
 	hci_reset();
-	HAL_Delay(2000);
+	HAL_Delay(100);
 
 //	uint8_t hwVersion = 0;
 //	uint16_t fwVersion = 0;
@@ -74,6 +75,8 @@ uint8_t BLE_Device_Init(void) {
 	if (aci_gap_init(GAP_PERIPHERAL_ROLE, 0x00, 0x07, &service_handle, &dev_name_char_handle, &appearance_char_handle) != BLE_STATUS_SUCCESS) {
 		PRINT_DBG("aci_gap_init() failed\r\n");
 		return BLE_STATUS_ERROR;
+	} else {
+		PRINT_DBG("aci_gap_init() success, handles %02x %02x %02x\r\n", service_handle, dev_name_char_handle, appearance_char_handle);
 	}
 
 	uint8_t device_name[] = { ADVERTISE_NAME };
@@ -131,13 +134,8 @@ void BLE_Device_SetDiscoverable(void) {
 
 			/* manufacturer data */
 			9, 						0xFF, 0x34, 0x12, bdaddr[5], bdaddr[4], bdaddr[3], bdaddr[2], bdaddr[1], bdaddr[0]
-		    /*     					COMPANY-ID  -----------------------------MAC-ADDR---------------------------*/
+		    /*     					COMPANY--ID  ------------------------------MAC-ADDR------------------------------*/
 	};
-
-	PRINT_DBG("Advertisement Data (%d): ", sizeof(manuf_data));
-	for (int i = 0; i < sizeof(manuf_data); i++)
-		PRINT_DBG("%02x ", manuf_data[i]);
-	PRINT_DBG("\r\n");
 
 	hci_le_set_scan_response_data(0, NULL);
 	ret = aci_gap_set_discoverable(ADV_DATA_TYPE, ADV_INTERV_MIN, ADV_INTERV_MAX, PUBLIC_ADDR, NO_WHITE_LIST_USE, sizeof(local_name), local_name, 0, NULL, 0, 0);
@@ -145,4 +143,6 @@ void BLE_Device_SetDiscoverable(void) {
 
 	if (ret != BLE_STATUS_SUCCESS)
 		PRINT_DBG("aci_gap_set_discoverable() failed: 0x%02x\r\n", ret);
+	else
+		PRINT_DBG("aci_gap_set_discoverable() success\r\n");
 }

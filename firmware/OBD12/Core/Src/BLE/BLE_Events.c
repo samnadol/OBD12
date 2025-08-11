@@ -36,7 +36,7 @@ void BLE_AttributeRequest(uint16_t Connection_Handle, uint16_t attr_handle, uint
 	if (attr_handle == (Handle_Char_Status_Power + EVENT_SUBSCRIBE_CHANGE)) {
 		Subscription_Status_Power = (att_data[0] == 1);
 	} else {
-		PRINT_DBG("Got unknown modification to GATT Attribute %x\r\n", attr_handle);
+		PRINT_DBG("Got unknown modification to GATT Attribute %02x\r\n", attr_handle);
 	}
 }
 
@@ -45,7 +45,7 @@ void BLE_WriteRequest(uint16_t connection_handle, uint16_t attr_handle, uint8_t 
 	if (attr_handle == (Handle_Char_Command_Write + EVENT_WRITE)) {
 		ServiceCommand_CharacteristricWrite_Process(connection_handle, attr_handle, data, data_length);
 	} else {
-		PRINT_DBG("Got unknown write request to GATT Attribute %x\r\n", attr_handle);
+		PRINT_DBG("Got unknown write request to GATT Attribute %02x\r\n", attr_handle);
 	}
 }
 

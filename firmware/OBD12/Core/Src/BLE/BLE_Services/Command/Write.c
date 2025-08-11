@@ -38,6 +38,7 @@ tBleStatus ServiceCommand_CharacteristicWrite_Add() {
 	if (ret != BLE_STATUS_SUCCESS)
 		goto fail;
 
+	PRINT_DBG("ServiceCommand_CharacteristicWrite_Add() success, handle %02x\r\n", Handle_Char_Command_Write);
 	return BLE_STATUS_SUCCESS;
 
 	fail: return BLE_STATUS_ERROR;

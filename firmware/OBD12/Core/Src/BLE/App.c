@@ -1,9 +1,12 @@
-#include <BLE/App.h>
-#include <BLE/BLE_Device.h>
-#include <BLE/BLE_Events.h>
-#include <BLE/BLE_Services/DeviceInformation.h>
-#include <BLE/BLE_Services/Status.h>
+#include "BLE/App.h"
+
 #include <stdlib.h>
+
+#include "CAN/OBD.h"
+#include "BLE/BLE_Device.h"
+#include "BLE/BLE_Events.h"
+#include "BLE/BLE_Services/DeviceInformation.h"
+#include "BLE/BLE_Services/Status.h"
 
 #include "hci_tl.h"
 #include "bluenrg1_aci.h"
@@ -19,13 +22,29 @@ uint16_t HWCONF_PIN[2] = { GPIO_PIN_4, GPIO_PIN_8 };
 
 uint8_t HWCONF_VALUE[2] = { 0 };
 
+extern FDCAN_HandleTypeDef hfdcan1;
+extern TIM_HandleTypeDef htim6;
+
 volatile uint16_t BLE_CONNECTION_HANDLE = FALSE;
-volatile uint8_t  BLE_ENABLE_CONNECTION_FLAG = TRUE;
-volatile uint8_t  BLE_CONNECTED = FALSE;
-volatile uint8_t  BLE_PAIRING = FALSE;
-volatile uint8_t  BLE_PAIRED = FALSE;
+volatile uint8_t BLE_ENABLE_CONNECTION_FLAG = TRUE;
+volatile uint8_t BLE_CONNECTED = FALSE;
+volatile uint8_t BLE_PAIRING = FALSE;
+volatile uint8_t BLE_PAIRED = FALSE;
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+	if (htim == &htim6) {
+		if (Subscription_Status_Power)
+			ServiceStatus_CharacteristicPower_Update();
+
+		OBD_ReadVin(&hfdcan1);
+		if (BLE_CONNECTED)
+			HAL_GPIO_TogglePin(STATUS_LED_BANK[0], STATUS_LED_PIN[0]);
+	}
+}
 
 static void User_Init(void) {
+	HAL_TIM_Base_Start_IT(&htim6);
+
 	HAL_GPIO_WritePin(STATUS_LED_BANK[0], STATUS_LED_PIN[0], GPIO_PIN_SET);
 
 	HWCONF_VALUE[0] = HAL_GPIO_ReadPin(HWCONF_BANK[0], HWCONF_PIN[0]);
@@ -38,13 +57,15 @@ void MX_BlueNRG_2_Init(void) {
 	PRINT_DBG("\033[2J"); /* serial console clear screen */
 	PRINT_DBG("\033[H"); /* serial console cursor to home */
 	PRINT_DBG("BlueNRG-2 Application\r\n");
-	PRINT_DBG("Hardware Configuration: 0b%d%d\r\n", HWCONF_VALUE[0], HWCONF_VALUE[1]);
+	PRINT_DBG("Hardware Configuration: 0b%d%d\r\n", HWCONF_VALUE[0],
+			HWCONF_VALUE[1]);
 
 	hci_init(BLE_ProcessUserEvent, NULL);
 
 	if (BLE_Device_Init() != BLE_STATUS_SUCCESS) {
 		PRINT_DBG("BLE_DeviceInit() failed\r\n");
-		while (1);
+		while (1)
+			;
 	}
 }
 
@@ -64,10 +85,7 @@ static void User_Process(void) {
 	}
 
 	if (BLE_PAIRED) {
-		if (Subscription_Status_Power)
-			ServiceStatus_CharacteristicPower_Update();
-
-		HAL_Delay(1000);
+//		HAL_Delay(1000);
 	}
 }
 
