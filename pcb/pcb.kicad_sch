@@ -7083,7 +7083,7 @@
 			)
 		)
 		(instances
-			(project "obd2_scanner"
+			(project "pcb"
 				(path "/1dc7083e-d9cb-49fd-bacf-55644b194822"
 					(page "4")
 				)
@@ -7175,7 +7175,7 @@
 			)
 		)
 		(instances
-			(project "obd2_scanner"
+			(project "pcb"
 				(path "/1dc7083e-d9cb-49fd-bacf-55644b194822"
 					(page "2")
 				)
@@ -7287,7 +7287,7 @@
 			)
 		)
 		(instances
-			(project "obd2_scanner"
+			(project "pcb"
 				(path "/1dc7083e-d9cb-49fd-bacf-55644b194822"
 					(page "3")
 				)
