@@ -3,8 +3,16 @@
 
 #include "stm32g4xx_hal.h"
 
-extern GPIO_TypeDef *STATUS_LED_BANK[2];
-extern uint16_t STATUS_LED_PIN[2];
+#define STATUS_LED_1_BANK GPIOA
+#define STATUS_LED_2_BANK GPIOB
+#define STATUS_LED_1_PIN GPIO_PIN_5
+#define STATUS_LED_2_PIN GPIO_PIN_0
+
+#define HWCONF_1_BANK GPIOA
+#define HWCONF_2_BANK GPIOA
+#define HWCONF_1_PIN GPIO_PIN_4
+#define HWCONF_2_PIN GPIO_PIN_8
+
 extern uint8_t HWCONF[2];
 
 void MX_BlueNRG_2_Init(void);

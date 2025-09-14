@@ -1,7 +1,7 @@
 #include <BLE/App.h>
 #include <BLE/BLE_Device.h>
 #include <BLE/BLE_Events.h>
-#include <BLE/BLE_Services/Command.h>
+#include <BLE/BLE_Services/NordicUART.h>
 #include <BLE/BLE_Services/Status.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +9,6 @@
 #include "bluenrg1_aci.h"
 #include "bluenrg1_hci_le.h"
 #include "bluenrg1_gatt_aci.h"
-
 
 extern volatile uint8_t BLE_ENABLE_CONNECTION_FLAG;
 extern volatile uint8_t BLE_CONNECTED;
@@ -35,6 +34,8 @@ void BLE_ReadRequest(uint16_t handle) {
 void BLE_AttributeRequest(uint16_t Connection_Handle, uint16_t attr_handle, uint16_t Offset, uint8_t data_length, uint8_t *att_data) {
 	if (attr_handle == (Handle_Char_Status_Power + EVENT_SUBSCRIBE_CHANGE)) {
 		Subscription_Status_Power = (att_data[0] == 1);
+	} else if (attr_handle == (Handle_Char_NordicUART_TX + EVENT_SUBSCRIBE_CHANGE)) {
+		Subscription_NordicUART_TX = (att_data[0] == 1);
 	} else {
 		PRINT_DBG("Got unknown modification to GATT Attribute %02x\r\n", attr_handle);
 	}
@@ -42,8 +43,8 @@ void BLE_AttributeRequest(uint16_t Connection_Handle, uint16_t attr_handle, uint
 
 void BLE_WriteRequest(uint16_t connection_handle, uint16_t attr_handle, uint8_t data_length, uint8_t *data)
 {
-	if (attr_handle == (Handle_Char_Command_Write + EVENT_WRITE)) {
-		ServiceCommand_CharacteristricWrite_Process(connection_handle, attr_handle, data, data_length);
+	if (attr_handle == (Handle_Char_NordicUART_RX + EVENT_WRITE)) {
+		ServiceNordicUART_CharacteristicRX_Process(connection_handle, attr_handle, data, data_length);
 	} else {
 		PRINT_DBG("Got unknown write request to GATT Attribute %02x\r\n", attr_handle);
 	}
@@ -78,7 +79,7 @@ void hci_le_connection_complete_event(uint8_t Status,
 	BLE_CONNECTION_HANDLE = Connection_Handle;
 
 	PRINT_DBG("Connected\r\n");
-	HAL_GPIO_WritePin(STATUS_LED_BANK[1], STATUS_LED_PIN[1], GPIO_PIN_SET);
+//	HAL_GPIO_WritePin(STATUS_LED_BANK[1], STATUS_LED_PIN[1], GPIO_PIN_SET);
 }
 
 // connection closed
@@ -92,7 +93,7 @@ void hci_disconnection_complete_event(uint8_t Status,
 	BLE_CONNECTION_HANDLE = 0;
 
 	PRINT_DBG("Disconnected (0x%02x)\r\n", Reason);
-	HAL_GPIO_WritePin(STATUS_LED_BANK[1], STATUS_LED_PIN[1], GPIO_PIN_RESET);
+//	HAL_GPIO_WritePin(STATUS_LED_BANK[1], STATUS_LED_PIN[1], GPIO_PIN_RESET);
 }
 
 // fired when passkey required for pairing

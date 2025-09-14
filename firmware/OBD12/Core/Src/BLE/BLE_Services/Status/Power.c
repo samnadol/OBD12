@@ -13,6 +13,7 @@
 enum {
 	USB_REG = GPIO_PIN_6, CAN_REG = GPIO_PIN_7,
 };
+
 typedef struct
 {
 	uint8_t USB_ST;
@@ -21,6 +22,7 @@ typedef struct
 	uint16_t USB_OUT;
 	uint16_t CAN_OUT;
 } POWER_STATUS;
+
 extern ADC_HandleTypeDef hadc2;
 
 uint16_t Handle_Char_Status_Power;
@@ -59,7 +61,7 @@ tBleStatus ServiceStatus_CharacteristicPower_Update() {
 	status.CAN_ST = Read_Regulator_Status(CAN_REG);
 	status.USB_OUT = Read_Regulator_Out(USB_REG);
 	status.CAN_OUT = Read_Regulator_Out(CAN_REG);
-	printf("POWER DATA: USB %d %.2f, CAN %d %.2f\r\n", status.USB_ST, status.USB_OUT * 3.3 / 4096, status.CAN_ST, status.CAN_OUT * 3.3 / 4096);
+	PRINT_DBG("POWER DATA: USB %d %.2f, CAN %d %.2f\r\n", status.USB_ST, status.USB_OUT * 3.3 / 4096, status.CAN_ST, status.CAN_OUT * 3.3 / 4096);
 
 	ret = aci_gatt_update_char_value(Handle_Serv_Status, Handle_Char_Status_Power, 0, sizeof(POWER_STATUS), (uint8_t *) &status);
 

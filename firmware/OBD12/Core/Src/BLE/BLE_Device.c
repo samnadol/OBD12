@@ -5,8 +5,8 @@
  *      Author: samna
  */
 
+#include <BLE/BLE_Services/NordicUART.h>
 #include "BLE/BLE_Device.h"
-#include "BLE/BLE_Services/Command.h"
 #include "BLE/BLE_Services/DeviceInformation.h"
 #include "BLE/BLE_Services/Status.h"
 
@@ -110,8 +110,8 @@ uint8_t BLE_Device_Init(void) {
 		return BLE_STATUS_ERROR;
 	}
 
-	if (ServiceCommand_Add() != BLE_STATUS_SUCCESS) {
-		PRINT_DBG("Error while adding Command Service\r\n");
+	if (ServiceNordicUART_Add() != BLE_STATUS_SUCCESS) {
+		PRINT_DBG("Error while adding NordicUART Service\r\n");
 		return BLE_STATUS_ERROR;
 	}
 
