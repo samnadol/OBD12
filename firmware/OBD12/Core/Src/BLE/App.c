@@ -87,7 +87,6 @@ static void User_Init(void) {
 
 	PRINT_DBG("OBD12\r\n");
 	PRINT_DBG("Hardware Configuration: 0b%d%d\r\n", HWCONF_VALUE[0], HWCONF_VALUE[1]);
-
 	PRINT_DBG("STM32 UID: ");
 	for (int i = 0; i < 3; i++)
 		PRINT_DBG("%lX", uid[i]);

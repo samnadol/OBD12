@@ -1,4 +1,4 @@
-25604586965589299
+25608103682035482
 Audio_Module
 Reverb_BTDR-1H
 Digital Reverberation Unit, http://www.belton.co.kr/inc/downfile.php?seq=17&file=pdf (footprint from http://www.uk-electronic.de/PDF/BTDR-1.pdf)
@@ -102641,6 +102641,13 @@ Varistor VF
 2
 2
 custom
+691137710002
+
+
+0
+2
+2
+custom
 BLUENRG-2M_STM
 
 BLUENRG-M2SP 
@@ -102675,3 +102682,10 @@ USB C Type-C Receptacle SMD
 0
 20
 17
+custom
+logo
+
+
+0
+0
+0
