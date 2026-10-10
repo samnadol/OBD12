@@ -1,102 +1,169 @@
 /*
- * ISO_TP.c
+ * ISOTP.c
  *
  *  Created on: Aug 18, 2025
  *      Author: samna
  */
 
 #include "CAN/ISOTP.h"
-#include "CAN/OBD.h"
 
-#include "_Debug.h"
-#include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
 
-extern FDCAN_HandleTypeDef hfdcan1;
+#include "_Debug.h"
+#include "App/sched.h"
+#include "CAN/CAN.h"
+
+#define ECU_COUNT (CAN_ID_RESPONSE_LAST - CAN_ID_RESPONSE_FIRST + 1)
+
+// a response ID is the request ID + 8
+#define REQUEST_ID_FOR(source) ((uint16_t) ((source) - 8))
+
+#define FC_CONTINUE_TO_SEND 0x0
+#define FC_OVERFLOW 0x2
 
 typedef struct
 {
-	uint8_t active;
-	uint16_t expectedSize;
-	uint16_t receivedSize;
-	uint8_t *data;
+	bool active;
+	uint16_t expected;
+	uint16_t received;
+	uint8_t next_sn;
+	uint32_t last_frame_tick;
+	uint8_t buf[ISOTP_MAX_MESSAGE];
+} isotp_session_t;
 
-	uint8_t serviceID;
-	uint8_t pID;
-} ISO_TP_SESSION;
+static isotp_session_t sessions[ECU_COUNT];
 
-ISO_TP_SESSION isoTPSessions[8];
-
-uint8_t *ISOTP_DataAccumulator_Add(uint32_t source, uint8_t *canFrame) {
-    size_t addSize, frameOffset;
-    if (canFrame[0] >> 4 == CAN_PCI_FF)
-    {
-    	size_t _expectedSize = ((canFrame[0] & 0x0F) << 8) | canFrame[1];
-    	isoTPSessions[source - 0x7E8].active = 1;
-        isoTPSessions[source - 0x7E8].expectedSize = _expectedSize;
-        isoTPSessions[source - 0x7E8].receivedSize = 0;
-
-        if (isoTPSessions[source - 0x7E8].data)
-        {
-            free(isoTPSessions[source - 0x7E8].data);
-        }
-
-        isoTPSessions[source - 0x7E8].data = (uint8_t*) malloc(sizeof(uint8_t) * _expectedSize);
-
-    	addSize = 6;
-    	frameOffset = 2;
-    }
-    else if (canFrame[0] >> 4 == CAN_PCI_CF)
-    {
-    	addSize = (isoTPSessions[source - 0x7E8].receivedSize + 7 > isoTPSessions[source - 0x7E8].expectedSize) ? isoTPSessions[source - 0x7E8].expectedSize - isoTPSessions[source - 0x7E8].receivedSize : 7;
-    	frameOffset = 1;
-    }
-    else
-    {
-    	addSize = 0;
-    	frameOffset = 0;
-    }
-
-	memcpy(isoTPSessions[source - 0x7E8].data + isoTPSessions[source - 0x7E8].receivedSize, canFrame + frameOffset, addSize);
-	isoTPSessions[source - 0x7E8].receivedSize += addSize;
-
-	if ((isoTPSessions[source - 0x7E8].expectedSize - isoTPSessions[source - 0x7E8].receivedSize) == 0) // if this conversion is complete, return the data
-		return isoTPSessions[source - 0x7E8].data;
-
-	return 0;
+static void send_flow_control(uint32_t source, uint8_t flow_status)
+{
+	// block size 0 (send everything), separation time 0
+	uint8_t frame[8] = { (CAN_PCI_FC << 4) | flow_status, 0, 0 };
+	CAN_Tx(REQUEST_ID_FOR(source), frame);
 }
 
-void ISOTP_ProcessFrame(uint32_t source, uint8_t *frame)
+static void on_single_frame(uint32_t source, const uint8_t *data, uint8_t dlc)
 {
-	if ((frame[0] >> 4) == CAN_PCI_SF) // single packet data
+	uint8_t len = data[0] & 0x0F;
+	if (len == 0 || len > 7 || len > dlc - 1)
 	{
-		OBD_ParseData(frame[0] & 0x0F, frame + 1);
+		PRINT_DBG("ISO-TP 0x%03lx: bad single frame length %u\r\n", source, len);
+		return;
 	}
-	else if ((frame[0] >> 4) == CAN_PCI_FF) // first frame of multi-frame response
-	{
-		ISOTP_DataAccumulator_Add(source, frame);
 
-		// send a FC packet back to the ECU to instruct how to send the rest of the packets
-		uint8_t packet[8] = { 0 };
-		packet[0] = (CAN_PCI_FC << 4) | 0;
-		packet[1] = 0; // block size
-		packet[2] = 0; // separation time
-		CAN_Tx(&hfdcan1, source - 8, (uint8_t*) &packet, 8);
-	}
-	else if ((frame[0] >> 4) == CAN_PCI_CF) // consecutive frame of multi-frame response
+	ISOTP_OnMessage(source, data + 1, len);
+}
+
+static void on_first_frame(isotp_session_t *s, uint32_t source, const uint8_t *data, uint8_t dlc)
+{
+	uint16_t len = ((uint16_t) (data[0] & 0x0F) << 8) | data[1];
+
+	if (len < 8 || dlc < 8)
 	{
-		if (ISOTP_DataAccumulator_Add(source, frame)) // got all parts of this message
+		PRINT_DBG("ISO-TP 0x%03lx: bad first frame (len %u, dlc %u)\r\n", source, len, dlc);
+		s->active = false;
+		return;
+	}
+
+	if (len > ISOTP_MAX_MESSAGE)
+	{
+		PRINT_DBG("ISO-TP 0x%03lx: message too long (%u)\r\n", source, len);
+		s->active = false;
+		send_flow_control(source, FC_OVERFLOW);
+		return;
+	}
+
+	s->active = true;
+	s->expected = len;
+	s->received = 6;
+	s->next_sn = 1;
+	s->last_frame_tick = HAL_GetTick();
+	memcpy(s->buf, data + 2, 6);
+
+	send_flow_control(source, FC_CONTINUE_TO_SEND);
+}
+
+static void on_consecutive_frame(isotp_session_t *s, uint32_t source, const uint8_t *data, uint8_t dlc)
+{
+	if (!s->active)
+		return; // not ours, or the session was aborted
+
+	uint8_t sn = data[0] & 0x0F;
+	if (sn != s->next_sn)
+	{
+		PRINT_DBG("ISO-TP 0x%03lx: expected SN %u, got %u, aborting\r\n", source, s->next_sn, sn);
+		s->active = false;
+		return;
+	}
+
+	uint16_t remaining = s->expected - s->received;
+	uint16_t chunk = dlc - 1;
+	if (chunk > remaining)
+		chunk = remaining;
+
+	memcpy(s->buf + s->received, data + 1, chunk);
+	s->received += chunk;
+	s->next_sn = (s->next_sn + 1) & 0x0F;
+	s->last_frame_tick = HAL_GetTick();
+
+	if (s->received == s->expected)
+	{
+		s->active = false;
+		ISOTP_OnMessage(source, s->buf, s->received);
+	}
+}
+
+void ISOTP_OnFrame(uint32_t source, const uint8_t *data, uint8_t dlc)
+{
+	if (source < CAN_ID_RESPONSE_FIRST || source > CAN_ID_RESPONSE_LAST || dlc < 2)
+		return;
+
+	isotp_session_t *s = &sessions[source - CAN_ID_RESPONSE_FIRST];
+
+	switch (data[0] >> 4)
+	{
+	case CAN_PCI_SF:
+		on_single_frame(source, data, dlc);
+		break;
+	case CAN_PCI_FF:
+		on_first_frame(s, source, data, dlc);
+		break;
+	case CAN_PCI_CF:
+		on_consecutive_frame(s, source, data, dlc);
+		break;
+	case CAN_PCI_FC:
+		break; // we never send multi-frame requests
+	default:
+		PRINT_DBG("ISO-TP 0x%03lx: unknown PCI type 0x%x\r\n", source, data[0] >> 4);
+		break;
+	}
+}
+
+void ISOTP_Poll(void)
+{
+	for (int i = 0; i < ECU_COUNT; i++)
+	{
+		if (sessions[i].active && elapsed_ms(sessions[i].last_frame_tick, ISOTP_N_CR_TIMEOUT_MS))
 		{
-			OBD_ParseData(isoTPSessions[source - 0x7E8].receivedSize, isoTPSessions[source - 0x7E8].data);
-
-			free(isoTPSessions[source - 0x7E8].data);
-
-			isoTPSessions[source - 0x7E8].data = 0;
+			PRINT_DBG("ISO-TP 0x%03x: timed out waiting for consecutive frame\r\n", CAN_ID_RESPONSE_FIRST + i);
+			sessions[i].active = false;
 		}
 	}
-	else
-	{
-		PRINT_DBG("UNKNOWN CAN FRAME TYPE 0x%x\r\n", (frame[0] >> 4));
-	}
+}
+
+bool ISOTP_Busy(void)
+{
+	for (int i = 0; i < ECU_COUNT; i++)
+		if (sessions[i].active)
+			return true;
+	return false;
+}
+
+bool ISOTP_SendSingle(uint16_t dest, const uint8_t *data, uint8_t len)
+{
+	if (len == 0 || len > 7)
+		return false;
+
+	uint8_t frame[8] = { 0 };
+	frame[0] = (CAN_PCI_SF << 4) | len;
+	memcpy(frame + 1, data, len);
+	return CAN_Tx(dest, frame);
 }
