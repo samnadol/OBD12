@@ -1,18 +1,32 @@
 /*
- * obd.h
+ * OBD.h
  *
- *  Created on: Aug 1, 2025
- *      Author: samna
+ * OBD-II (SAE J1979 over ISO 15765-4) request engine. Requests are queued and
+ * sent one at a time; responses from every ECU that answers within the
+ * response window are collected and handed back as a list of records:
+ *
+ *   record = [ecu_id u16 LE][len u8][response message, len bytes]
+ *
+ * where the response message starts with the response service ID
+ * (e.g. 0x41 ...) or 0x7F for a negative response.
  */
 
 #ifndef OBD_H_
 #define OBD_H_
 
-#include <CAN/CAN.h>
+#include <stdbool.h>
 #include <stdint.h>
 
-#define ECU_IDENTIFER_BROADCAST 0x7DF
-#define ECU_IDENTIFIER_ENGINE 0x7E0
+#define OBD_ID_BROADCAST 0x7DF
+#define OBD_ID_ENGINE    0x7E0
+
+#define OBD_RESPONSE_WINDOW_MS   50     // P2_CAN, ISO 15765-4
+#define OBD_RESPONSE_PENDING_MS  5000   // P2*_CAN, after NRC 0x78
+#define OBD_RESULT_MAX           236    // bytes of records per request
+#define OBD_LIVE_MAX_PIDS        16
+
+#define OBD_NEGATIVE_RESPONSE 0x7F
+#define OBD_NRC_RESPONSE_PENDING 0x78
 
 typedef enum {
 	OBD_SERVICE_DATA_LIVE = 0x01,
@@ -29,53 +43,61 @@ typedef enum {
 
 typedef enum {
 	OBD_S1_PID_SUPPORTED = 0x00,
-	OBD_S1_PID_STATUS_SINCE_CLEAR = 0x01,
-	OBD_S1_PID_FREEZE_DTC = 0x02,
-	OBD_S1_PID_LIVE_FUEL_SYSTEM_STATUS = 0x03,
-	OBD_S1_PID_ENGINE_LOAD = 0x04,
 	OBD_S1_PID_COOLANT_TEMP = 0x05,
-	OBD_S1_PID_STFT1 = 0x06,
-	OBD_S1_PID_LTFT1 = 0x07,
-	OBD_S1_PID_STFT2 = 0X08,
-	OBD_S1_PID_LTFT2 = 0X09,
-	OBD_S1_PID_FUEL_PRESSURE = 0X0A,
-	OBD_S1_PID_MAP = 0x0B,
 	OBD_S1_PID_ENGINE_SPEED = 0x0C,
 	OBD_S1_PID_VEHICLE_SPEED = 0x0D,
-	OBD_S1_PID_TIMING_ADVANCE = 0x0E,
 	OBD_S1_PID_INTAKE_AIR_TEMP = 0x0F,
-	OBD_S1_PID_MAF = 0x10,
 	OBD_S1_PID_THROTTLE = 0x11,
-	OBD_S1_PID_SECONDARY_AIR_STATUS = 0x12,
 } OBD_S1_PID;
 
 typedef enum {
 	OBD_S9_PID_SUPPORTED = 0x00,
-	OBD_S9_PID_VIN_MESSAGECOUNT = 0x01,
 	OBD_S9_PID_VIN = 0x02,
 } OBD_S9_PID;
 
-struct OBD_CachedData
+typedef enum
 {
-	uint8_t *data;
-	size_t data_size;
+	OBD_STATUS_OK = 0,          // at least one ECU answered (possibly negatively)
+	OBD_STATUS_TIMEOUT = 1,     // nobody answered
+	OBD_STATUS_TX_FAILED = 2,   // could not send (bus-off, TX FIFO full)
+} obd_status_t;
 
-	uint8_t service;
-	uint8_t pid;
+typedef enum
+{
+	OBD_KIND_HOST = 0,          // raw request from a host, result goes to OBD_OnRequestDone()
+	OBD_KIND_HOST_VIN = 1,      // VIN request from a host, result goes to OBD_OnRequestDone()
+	OBD_KIND_LIVE = 2,          // internal: live data polling
+	OBD_KIND_VIN = 3,           // internal: VIN read at startup
+} obd_kind_t;
 
-	uint32_t timestamp;
+typedef struct
+{
+	uint16_t dest;              // 0x7DF (broadcast) or 0x7E0-0x7E7 (physical)
+	uint8_t len;                // request length, 1-7
+	uint8_t data[7];            // service ID, PID(s)
+	uint8_t kind;               // obd_kind_t
+	uint8_t transport;          // which host asked (OBD_KIND_HOST*)
+	uint8_t seq;                // host request sequence number
+} obd_request_t;
 
-	struct OBD_CachedData* next;
-};
+void OBD_Init(void);
+void OBD_Process(void);
 
-void OBD_Rx(uint32_t sourceIdentifier, uint8_t *frame);
-void OBD_Tx(FDCAN_HandleTypeDef *hfdcan, uint32_t destIdentifier, uint8_t service, uint8_t pid);
+// false if the queue is full
+bool OBD_Submit(const obd_request_t *req);
 
-struct OBD_CachedData *OBD_GetData_Cache(uint8_t service, uint8_t pid);
-struct OBD_CachedData *OBD_GetData_Poll(uint32_t destIdentifier, uint8_t service, uint8_t pid, uint32_t timeout);
+// true (and copies 17 characters) once the VIN is known
+bool OBD_GetVin(char vin[17]);
 
-void OBD_LL_PutData(uint8_t service, uint8_t pid, uint8_t *data, size_t data_size);
+// live polling of mode 01 PIDs; only runs while started
+void OBD_LiveStart(uint16_t interval_ms, const uint8_t *pids, uint8_t count);
+void OBD_LiveStop(void);
+bool OBD_LiveActive(void);
 
-void OBD_ParseData(size_t length, uint8_t *frame);
+// implemented by the application:
+// a host request finished
+void OBD_OnRequestDone(const obd_request_t *req, obd_status_t status, const uint8_t *records, uint16_t records_len);
+// one live polling cycle finished; records are [pid u8][len u8][data] (data excludes 0x41 and the PID)
+void OBD_OnLiveData(const uint8_t *records, uint16_t records_len);
 
 #endif /* OBD_H_ */
