@@ -21,13 +21,16 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdio.h>
-
 #include "_Debug.h"
+#include "App/commands.h"
+#include "App/status.h"
+#include "App/system.h"
+#include "App/watchdog.h"
 #include "BLE/App.h"
 #include "CAN/CAN.h"
 #include "CAN/OBD.h"
-#include "UART/Uart.h"
+#include "Comms/comms.h"
+#include "Comms/transport_usb.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -74,24 +77,6 @@ static void MX_TIM7_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-#define UART_RX_BUFFER_SIZE 1
-uint8_t UartRxBuffer[UART_RX_BUFFER_SIZE];
-size_t UartRxDataLength = 0;
-
-int __io_putchar(int ch) {
-	HAL_UART_Transmit(&huart1, (uint8_t*) &ch, 1, HAL_MAX_DELAY);
-	return ch;
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-	UART_USB_RX(UartRxBuffer, UART_RX_BUFFER_SIZE);
-	HAL_UART_Receive_IT(&huart1, UartRxBuffer, UART_RX_BUFFER_SIZE);
-}
-
-void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs) {
-	CAN_Rx(hfdcan, RxFifo0ITs);
-}
-
 /* USER CODE END 0 */
 
 /**
@@ -128,21 +113,38 @@ int main(void) {
 	MX_TIM6_Init();
 	MX_TIM7_Init();
 	/* USER CODE BEGIN 2 */
-	MX_BlueNRG_2_Init();
+	system_init();
+
+	// comms first, so that log output from the rest of the init gets out
+	comms_init();
+	transport_usb_init(&huart1);
+	PRINT_DBG("OBD12 firmware %d.%d.%d, reset cause %d, last fault %d\r\n",
+			FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH,
+			system_reset_cause(), system_last_fault());
+
+	status_init();
 	CAN_Config(&hfdcan1);
+	OBD_Init();
+	MX_BlueNRG_2_Init();
 
-	MX_USART1_UART_Init();
-	HAL_UART_Receive_IT(&huart1, UartRxBuffer, UART_RX_BUFFER_SIZE);
-
+	wdg_init();
 	/* USER CODE END 2 */
 
 	/* Infinite loop */
 	/* USER CODE BEGIN WHILE */
 	while (1) {
-		MX_BlueNRG_2_Process();
 		/* USER CODE END WHILE */
 
 		/* USER CODE BEGIN 3 */
+		MX_BlueNRG_2_Process();
+		CAN_Process();
+		OBD_Process();
+		comms_process();
+		commands_process();
+		status_process();
+
+		wdg_kick();
+		__WFI(); // woken by any interrupt, at the latest by the 1 ms SysTick
 	}
 	/* USER CODE END 3 */
 }
@@ -257,7 +259,7 @@ static void MX_FDCAN1_Init(void) {
 	hfdcan1.Init.ClockDivider = FDCAN_CLOCK_DIV1;
 	hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
 	hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
-	hfdcan1.Init.AutoRetransmission = DISABLE;
+	hfdcan1.Init.AutoRetransmission = ENABLE;
 	hfdcan1.Init.TransmitPause = DISABLE;
 	hfdcan1.Init.ProtocolException = DISABLE;
 	hfdcan1.Init.NominalPrescaler = 1;
@@ -476,13 +478,8 @@ static void MX_GPIO_Init(void) {
  */
 void Error_Handler(void) {
 	/* USER CODE BEGIN Error_Handler_Debug */
-	PRINT_DBG("ERROR_HANDLER CALLED, HALTING\r\n");
-
-	/* User can add his own implementation to report the HAL error return state */
-	__disable_irq();
-
-	while (1) {
-	}
+	// records the fault (reported after reboot) and resets
+	system_fatal(FAULT_ERROR_HANDLER, (uint32_t) __builtin_return_address(0));
 	/* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
