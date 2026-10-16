@@ -12,7 +12,7 @@
 
 extern uint16_t Handle_Char_DeviceInformation_ManufacturerName;
 
-tBleStatus ServiceDeviceInformation_CharacteristicManufacturerName_Update();
-tBleStatus ServiceDeviceInformation_CharacteristicManufacturerName_Add();
+tBleStatus ServiceDeviceInformation_CharacteristicManufacturerName_Update(void);
+tBleStatus ServiceDeviceInformation_CharacteristicManufacturerName_Add(void);
 
 #endif /* INC_BLE_BLE_SERVICES_DEVICEINFORMATION_MANUFACTURERNAME_H_ */

@@ -1,148 +1,127 @@
-#include <BLE/App.h>
-#include <BLE/BLE_Device.h>
-#include <BLE/BLE_Events.h>
-#include <BLE/BLE_Services/NordicUART.h>
-#include <BLE/BLE_Services/Status.h>
-#include <stdio.h>
-#include <stdlib.h>
+/*
+ * BLE_Events.c
+ *
+ * Overrides the weak event callbacks of the BlueNRG-2 middleware. They are
+ * all called from hci_user_evt_proc() in the main loop.
+ */
+
+#include "BLE/BLE_Events.h"
+
+#include "_Debug.h"
+#include "App/system.h"
+#include "BLE/App.h"
+#include "BLE/BLE_Services/NordicUART.h"
+#include "BLE/BLE_Services/Status.h"
+#include "Comms/transport_ble.h"
 
 #include "bluenrg1_aci.h"
+#include "bluenrg1_events.h"
 #include "bluenrg1_hci_le.h"
-#include "bluenrg1_gatt_aci.h"
 
-extern volatile uint8_t BLE_ENABLE_CONNECTION_FLAG;
-extern volatile uint8_t BLE_CONNECTED;
-extern volatile uint8_t BLE_PAIRING;
-extern volatile uint8_t BLE_PAIRED;
-extern __IO uint16_t BLE_CONNECTION_HANDLE;
-extern uint32_t start_time;
+#define CCCD_NOTIFY 0x01
 
-void BLE_ReadRequest(uint16_t handle) {
-	tBleStatus ret;
-
-	if (handle == Handle_Char_Status_Power + 1)
+void aci_gatt_read_permit_req_event(uint16_t Connection_Handle, uint16_t Attribute_Handle, uint16_t Offset) {
+	if (Attribute_Handle == Handle_Char_Status_Power + EVENT_WRITE)
 		ServiceStatus_CharacteristicPower_Update();
 
-	if (BLE_CONNECTION_HANDLE != 0) {
-		ret = aci_gatt_allow_read(BLE_CONNECTION_HANDLE);
-		if (ret != BLE_STATUS_SUCCESS) {
-			PRINT_DBG("aci_gatt_allow_read() failed: 0x%02x\r\n", ret);
-		}
-	}
+	tBleStatus ret = aci_gatt_allow_read(Connection_Handle);
+	if (ret != BLE_STATUS_SUCCESS)
+		PRINT_DBG("aci_gatt_allow_read() failed: 0x%02x\r\n", ret);
 }
 
-void BLE_AttributeRequest(uint16_t Connection_Handle, uint16_t attr_handle, uint16_t Offset, uint8_t data_length, uint8_t *att_data) {
-	if (attr_handle == (Handle_Char_Status_Power + EVENT_SUBSCRIBE_CHANGE)) {
-		Subscription_Status_Power = (att_data[0] == 1);
-	} else if (attr_handle == (Handle_Char_NordicUART_TX + EVENT_SUBSCRIBE_CHANGE)) {
-		Subscription_NordicUART_TX = (att_data[0] == 1);
-	} else {
-		PRINT_DBG("Got unknown modification to GATT Attribute %02x\r\n", attr_handle);
-	}
-}
-
-void BLE_WriteRequest(uint16_t connection_handle, uint16_t attr_handle, uint8_t data_length, uint8_t *data)
-{
-	if (attr_handle == (Handle_Char_NordicUART_RX + EVENT_WRITE)) {
-		ServiceNordicUART_CharacteristicRX_Process(connection_handle, attr_handle, data, data_length);
-	} else {
-		PRINT_DBG("Got unknown write request to GATT Attribute %02x\r\n", attr_handle);
-	}
-}
-
-// fired when read request received
-void aci_gatt_read_permit_req_event(uint16_t Connection_Handle, uint16_t Attribute_Handle, uint16_t Offset) {
-	BLE_ReadRequest(Attribute_Handle);
-}
-
-// fired when attribute changes value
 void aci_gatt_attribute_modified_event(uint16_t Connection_Handle, uint16_t Attribute_Handle, uint16_t Offset, uint16_t Attr_Data_Length, uint8_t Attr_Data[]) {
-	BLE_AttributeRequest(Connection_Handle, Attribute_Handle, Offset, Attr_Data_Length, Attr_Data);
+	if (Attribute_Handle == Handle_Char_NordicUART_RX + EVENT_WRITE) {
+		transport_ble_on_rx(Attr_Data, Attr_Data_Length);
+	} else if (Attribute_Handle == Handle_Char_NordicUART_TX + EVENT_SUBSCRIBE_CHANGE) {
+		transport_ble_on_tx_subscription(Attr_Data_Length > 0 && (Attr_Data[0] & CCCD_NOTIFY));
+	} else if (Attribute_Handle == Handle_Char_Status_Power + EVENT_SUBSCRIBE_CHANGE) {
+		Subscription_Status_Power = (Attr_Data_Length > 0 && (Attr_Data[0] & CCCD_NOTIFY));
+	} else {
+		PRINT_DBG("Unknown modification of GATT attribute 0x%04x\r\n", Attribute_Handle);
+	}
 }
 
-void aci_gatt_write_permit_req_event(uint16_t Connection_Handle, uint16_t Attribute_Handle, uint8_t Data_Length, uint8_t Data[]) {
-	BLE_WriteRequest(Connection_Handle, Attribute_Handle, Data_Length, Data);
+void aci_att_exchange_mtu_resp_event(uint16_t Connection_Handle, uint16_t Server_RX_MTU) {
+	transport_ble_on_mtu(Server_RX_MTU);
 }
 
-// new connection is created
+void aci_gatt_tx_pool_available_event(uint16_t Connection_Handle, uint16_t Available_Buffers) {
+	transport_ble_on_tx_pool_available();
+}
+
 void hci_le_connection_complete_event(uint8_t Status,
 		uint16_t Connection_Handle, uint8_t Role, uint8_t Peer_Address_Type,
 		uint8_t Peer_Address[6], uint16_t Conn_Interval, uint16_t Conn_Latency,
 		uint16_t Supervision_Timeout, uint8_t Master_Clock_Accuracy) {
-	BLE_CONNECTED = TRUE;
-
-#if (!BLE_SECURE_PAIRING)
-	BLE_PAIRING = TRUE;
-	BLE_PAIRED = TRUE;
-#endif
-
-	BLE_CONNECTION_HANDLE = Connection_Handle;
-
-	PRINT_DBG("Connected\r\n");
-//	HAL_GPIO_WritePin(STATUS_LED_BANK[1], STATUS_LED_PIN[1], GPIO_PIN_SET);
-}
-
-// connection closed
-void hci_disconnection_complete_event(uint8_t Status,
-		uint16_t Connection_Handle, uint8_t Reason) {
-	BLE_CONNECTED = FALSE;
-	BLE_PAIRING = FALSE;
-	BLE_PAIRED = FALSE;
-
-	BLE_ENABLE_CONNECTION_FLAG = TRUE;
-	BLE_CONNECTION_HANDLE = 0;
-
-	PRINT_DBG("Disconnected (0x%02x)\r\n", Reason);
-//	HAL_GPIO_WritePin(STATUS_LED_BANK[1], STATUS_LED_PIN[1], GPIO_PIN_RESET);
-}
-
-// fired when passkey required for pairing
-void aci_gap_pass_key_req_event(uint16_t Connection_Handle) {
-	uint8_t ret;
-
-	ret = aci_gap_pass_key_resp(BLE_CONNECTION_HANDLE, BLE_CONNECTION_PASSKEY);
-	if (ret != BLE_STATUS_SUCCESS)
-		PRINT_DBG("aci_gap_pass_key_resp failed:0x%02x\r\n", ret);
-}
-
-// fired when pairing with passkey is compete
-void aci_gap_pairing_complete_event(uint16_t connection_handle, uint8_t status, uint8_t reason) {
-	if (status == 0x02) { // pairing failed status
-		PRINT_DBG("aci_gap_pairing_complete_event FAILED, status: 0x%02x, reason 0x%02x\r\n", status, reason);
-	} else {
-		BLE_PAIRED = TRUE;
+	if (Status != BLE_STATUS_SUCCESS) {
+		PRINT_DBG("BLE connection failed: 0x%02x\r\n", Status);
+		return;
 	}
+
+	BLE_OnConnected(Connection_Handle);
 }
 
-// process all events
+void hci_disconnection_complete_event(uint8_t Status, uint16_t Connection_Handle, uint8_t Reason) {
+	BLE_OnDisconnected(Reason);
+}
+
+void hci_encryption_change_event(uint8_t Status, uint16_t Connection_Handle, uint8_t Encryption_Enabled) {
+	bool encrypted = (Status == BLE_STATUS_SUCCESS && Encryption_Enabled);
+	transport_ble_on_encryption(encrypted);
+
+	PRINT_DBG("BLE link encryption %s\r\n", encrypted ? "on" : "off");
+}
+
+// only used if the stack asks for the passkey instead of using the fixed one
+void aci_gap_pass_key_req_event(uint16_t Connection_Handle) {
+	tBleStatus ret = aci_gap_pass_key_resp(Connection_Handle, system_ble_passkey());
+	if (ret != BLE_STATUS_SUCCESS)
+		PRINT_DBG("aci_gap_pass_key_resp() failed: 0x%02x\r\n", ret);
+}
+
+void aci_gap_pairing_complete_event(uint16_t Connection_Handle, uint8_t Status, uint8_t Reason) {
+	if (Status != 0x00)
+		PRINT_DBG("BLE pairing failed, status 0x%02x, reason 0x%02x\r\n", Status, Reason);
+	else
+		PRINT_DBG("BLE pairing complete\r\n");
+}
+
+// the central lost its bond with us (e.g. "forget device" on the phone)
+void aci_gap_bond_lost_event(void) {
+	tBleStatus ret = aci_gap_allow_rebond(BLE_ConnectionHandle());
+	if (ret != BLE_STATUS_SUCCESS)
+		PRINT_DBG("aci_gap_allow_rebond() failed: 0x%02x\r\n", ret);
+}
+
 void BLE_ProcessUserEvent(void *pData) {
-	uint32_t i;
-
 	hci_spi_pckt *hci_pckt = (hci_spi_pckt*) pData;
-	if (hci_pckt->type == HCI_EVENT_PKT) {
-		hci_event_pckt *event_pckt = (hci_event_pckt*) hci_pckt->data;
+	if (hci_pckt->type != HCI_EVENT_PKT)
+		return;
 
-		if (event_pckt->evt == EVT_LE_META_EVENT) {
-			evt_le_meta_event *evt = (void*) event_pckt->data;
-			for (i = 0; i < (sizeof(hci_le_meta_events_table) / sizeof(hci_le_meta_events_table_type)); i++) {
-				if (evt->subevent == hci_le_meta_events_table[i].evt_code) {
-					hci_le_meta_events_table[i].process((void*) evt->data);
-				}
+	hci_event_pckt *event_pckt = (hci_event_pckt*) hci_pckt->data;
+
+	if (event_pckt->evt == EVT_LE_META_EVENT) {
+		evt_le_meta_event *evt = (void*) event_pckt->data;
+		for (uint32_t i = 0; i < (sizeof(hci_le_meta_events_table) / sizeof(hci_le_meta_events_table_type)); i++) {
+			if (evt->subevent == hci_le_meta_events_table[i].evt_code) {
+				hci_le_meta_events_table[i].process((void*) evt->data);
+				break;
 			}
-		} else if (event_pckt->evt == EVT_VENDOR) {
-			evt_blue_aci *blue_evt = (void*) event_pckt->data;
-			for (i = 0; i < (sizeof(hci_vendor_specific_events_table) / sizeof(hci_vendor_specific_events_table_type)); i++) {
-				if (blue_evt->ecode == hci_vendor_specific_events_table[i].evt_code) {
-					hci_vendor_specific_events_table[i].process((void*) blue_evt->data);
-				}
+		}
+	} else if (event_pckt->evt == EVT_VENDOR) {
+		evt_blue_aci *blue_evt = (void*) event_pckt->data;
+		for (uint32_t i = 0; i < (sizeof(hci_vendor_specific_events_table) / sizeof(hci_vendor_specific_events_table_type)); i++) {
+			if (blue_evt->ecode == hci_vendor_specific_events_table[i].evt_code) {
+				hci_vendor_specific_events_table[i].process((void*) blue_evt->data);
+				break;
 			}
-		} else {
-			for (i = 0; i < (sizeof(hci_events_table) / sizeof(hci_events_table_type)); i++) {
-				if (event_pckt->evt == hci_events_table[i].evt_code) {
-					hci_events_table[i].process((void*) event_pckt->data);
-				}
+		}
+	} else {
+		for (uint32_t i = 0; i < (sizeof(hci_events_table) / sizeof(hci_events_table_type)); i++) {
+			if (event_pckt->evt == hci_events_table[i].evt_code) {
+				hci_events_table[i].process((void*) event_pckt->data);
+				break;
 			}
 		}
 	}
 }
-

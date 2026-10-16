@@ -1,5 +1,5 @@
 /*
- * status.c
+ * Status.c
  *
  *  Created on: Aug 8, 2025
  *      Author: samna
@@ -21,12 +21,8 @@ tBleStatus ServiceStatus_Add(void) {
 	ret = aci_gatt_add_service(UUID_TYPE_128, &service_uuid, PRIMARY_SERVICE,
 			max_attribute_records, &Handle_Serv_Status);
 	if (ret != BLE_STATUS_SUCCESS)
-		goto fail;
+		return ret;
 
 	PRINT_DBG("ServiceStatus_Add() success, handle %02x\r\n", Handle_Serv_Status);
-	ServiceStatus_CharacteristicPower_Add();
-
-	return BLE_STATUS_SUCCESS;
-
-	fail: return BLE_STATUS_ERROR;
+	return ServiceStatus_CharacteristicPower_Add();
 }

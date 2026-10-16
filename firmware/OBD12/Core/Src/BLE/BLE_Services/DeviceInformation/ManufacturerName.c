@@ -5,6 +5,8 @@
  *      Author: samna
  */
 
+#include <string.h>
+
 #include <BLE/BLE_Services/DeviceInformation/ManufacturerName.h>
 #include <BLE/BLE_Services/DeviceInformation.h>
 
@@ -13,23 +15,21 @@
 
 uint16_t Handle_Char_DeviceInformation_ManufacturerName;
 
-tBleStatus ServiceDeviceInformation_CharacteristicManufacturerName_Update() {
+tBleStatus ServiceDeviceInformation_CharacteristicManufacturerName_Update(void) {
 	tBleStatus ret;
 
 	ret = aci_gatt_update_char_value(Handle_Serv_DeviceInformation,
 			Handle_Char_DeviceInformation_ManufacturerName, 0, strlen(ManufacturerName),
-			(uint8_t*) &ManufacturerName);
+			(uint8_t*) ManufacturerName);
 
-	if (ret != BLE_STATUS_SUCCESS) {
-		PRINT_DBG("Error while updating DeviceInformation ManufacturerName: 0x%04X\r\n", ret);
-		return BLE_STATUS_ERROR;
-	}
+	if (ret != BLE_STATUS_SUCCESS)
+		PRINT_DBG("Error while updating DeviceInformation ManufacturerName: 0x%02x\r\n", ret);
 
-	return BLE_STATUS_SUCCESS;
+	return ret;
 }
 
-tBleStatus ServiceDeviceInformation_CharacteristicManufacturerName_Add() {
-	uint8_t ret;
+tBleStatus ServiceDeviceInformation_CharacteristicManufacturerName_Add(void) {
+	tBleStatus ret;
 
 	Char_UUID_t char_uuid = { .Char_UUID_16 = UUID_CHAR_DEVICEINFORMATION_MANUFACTURERNAME };
 	ret = aci_gatt_add_char(Handle_Serv_DeviceInformation, UUID_TYPE_16,
@@ -39,12 +39,8 @@ tBleStatus ServiceDeviceInformation_CharacteristicManufacturerName_Add() {
 			&Handle_Char_DeviceInformation_ManufacturerName);
 
 	if (ret != BLE_STATUS_SUCCESS)
-		goto fail;
-
-	ServiceDeviceInformation_CharacteristicManufacturerName_Update();
+		return ret;
 
 	PRINT_DBG("ServiceDeviceInformation_CharacteristicManufacturerName_Add() success, handle %02x\r\n", Handle_Char_DeviceInformation_ManufacturerName);
-	return BLE_STATUS_SUCCESS;
-
-	fail: return BLE_STATUS_ERROR;
+	return ServiceDeviceInformation_CharacteristicManufacturerName_Update();
 }

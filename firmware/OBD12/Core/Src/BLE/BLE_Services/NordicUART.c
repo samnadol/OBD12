@@ -1,5 +1,5 @@
 /*
- * Command.c
+ * NordicUART.c
  *
  *  Created on: Aug 8, 2025
  *      Author: samna
@@ -26,14 +26,13 @@ tBleStatus ServiceNordicUART_Add(void) {
 	ret = aci_gatt_add_service(UUID_TYPE_128, &service_uuid, PRIMARY_SERVICE,
 			max_attribute_records, &Handle_Serv_NordicUART);
 	if (ret != BLE_STATUS_SUCCESS)
-		goto fail;
+		return ret;
 
 	PRINT_DBG("ServiceNordicUART_Add() success, handle %02x\r\n", Handle_Serv_NordicUART);
 
-	ServiceNordicUART_CharacteristicRX_Add();
-	ServiceNordicUART_CharacteristicTX_Add();
+	ret = ServiceNordicUART_CharacteristicRX_Add();
+	if (ret != BLE_STATUS_SUCCESS)
+		return ret;
 
-	return BLE_STATUS_SUCCESS;
-
-	fail: return BLE_STATUS_ERROR;
+	return ServiceNordicUART_CharacteristicTX_Add();
 }

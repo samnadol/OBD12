@@ -1,8 +1,11 @@
 /*
- * Command.h
+ * NordicUART.h
  *
  *  Created on: Aug 8, 2025
  *      Author: samna
+ *
+ * Nordic UART Service (NUS): the host writes protocol bytes to RX and receives
+ * protocol bytes as TX notifications. See Comms/transport_ble.c.
  */
 
 #ifndef INC_BLE_BLE_SERVICES_NORDICUART_H_

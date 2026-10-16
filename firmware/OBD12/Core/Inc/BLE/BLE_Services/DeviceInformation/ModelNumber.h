@@ -12,7 +12,7 @@
 
 extern uint16_t Handle_Char_DeviceInformation_ModelNumber;
 
-tBleStatus ServiceDeviceInformation_CharacteristicModelNumber_Update();
-tBleStatus ServiceDeviceInformation_CharacteristicModelNumber_Add();
+tBleStatus ServiceDeviceInformation_CharacteristicModelNumber_Update(void);
+tBleStatus ServiceDeviceInformation_CharacteristicModelNumber_Add(void);
 
 #endif /* INC_BLE_BLE_SERVICES_DEVICEINFORMATION_MODELNUMBER_H_ */

@@ -21,13 +21,13 @@ tBleStatus ServiceDeviceInformation_Add(void) {
 	ret = aci_gatt_add_service(UUID_TYPE_16, &service_uuid, PRIMARY_SERVICE,
 			max_attribute_records, &Handle_Serv_DeviceInformation);
 	if (ret != BLE_STATUS_SUCCESS)
-		goto fail;
+		return ret;
 
 	PRINT_DBG("ServiceDeviceInformation_Add() success, handle %02x\r\n", Handle_Serv_DeviceInformation);
-	ServiceDeviceInformation_CharacteristicManufacturerName_Add();
-	ServiceDeviceInformation_CharacteristicModelNumber_Add();
 
-	return BLE_STATUS_SUCCESS;
+	ret = ServiceDeviceInformation_CharacteristicManufacturerName_Add();
+	if (ret != BLE_STATUS_SUCCESS)
+		return ret;
 
-	fail: return BLE_STATUS_ERROR;
+	return ServiceDeviceInformation_CharacteristicModelNumber_Add();
 }

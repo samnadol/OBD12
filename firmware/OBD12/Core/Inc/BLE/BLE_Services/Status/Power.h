@@ -1,5 +1,5 @@
 /*
- * status.h
+ * Power.h
  *
  *  Created on: Aug 8, 2025
  *      Author: samna
@@ -13,7 +13,7 @@
 extern uint16_t Handle_Char_Status_Power;
 extern __IO uint8_t Subscription_Status_Power;
 
-tBleStatus ServiceStatus_CharacteristicPower_Update();
-tBleStatus ServiceStatus_CharacteristicPower_Add();
+tBleStatus ServiceStatus_CharacteristicPower_Update(void);
+tBleStatus ServiceStatus_CharacteristicPower_Add(void);
 
 #endif /* INC_BLE_BLE_SERVICES_STATUS_POWER_H_ */

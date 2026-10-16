@@ -15,4 +15,6 @@
 #include "bluenrg1_types.h"
 #include "bluenrg1_gatt_aci.h"
 
+#include "_Debug.h"
+
 #endif /* INC_BLE_BLE_SERVICES__COMMON_H_ */

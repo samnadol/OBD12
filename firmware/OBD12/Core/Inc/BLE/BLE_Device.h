@@ -1,5 +1,5 @@
 /*
- * Init.h
+ * BLE_Device.h
  *
  *  Created on: Aug 8, 2025
  *      Author: samna
@@ -14,9 +14,10 @@
 #define ADVERTISE_NAME_LEN 5
 #define BDADDR_SIZE        6
 
-#define BLE_SECURE_PAIRING 0
-#define BLE_CONNECTION_PASSKEY 123456
+// placeholder company ID in the manufacturer-specific advertising data
+#define ADVERTISE_COMPANY_ID 0x1234
 
+// static random address, least significant byte first
 extern uint8_t bdaddr[BDADDR_SIZE];
 
 uint8_t BLE_Device_Init(void);

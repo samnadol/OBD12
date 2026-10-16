@@ -1,5 +1,5 @@
 /*
- * Write.h
+ * TX.h
  *
  *  Created on: Aug 8, 2025
  *      Author: samna
@@ -11,9 +11,10 @@
 #include <BLE/BLE_Services/_Common.h>
 
 extern uint16_t Handle_Char_NordicUART_TX;
-extern __IO uint8_t Subscription_NordicUART_TX;
 
-tBleStatus ServiceNordicUART_CharacteristicTX_Update(uint8_t *data, size_t data_len);
-tBleStatus ServiceNordicUART_CharacteristicTX_Add();
+// sends data as a notification; returns the raw BlueNRG status
+// (BLE_STATUS_INSUFFICIENT_RESOURCES means "try again later")
+tBleStatus ServiceNordicUART_CharacteristicTX_Update(const uint8_t *data, uint16_t data_len);
+tBleStatus ServiceNordicUART_CharacteristicTX_Add(void);
 
 #endif /* INC_BLE_BLE_SERVICES_NORDICUART_TX_H_ */
