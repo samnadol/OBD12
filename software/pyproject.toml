@@ -1,0 +1,12 @@
+[project]
+name = "obd12"
+version = "0.2.0"
+description = "Host library and CLI for the OBD12 OBD-II dongle (USB serial and BLE)"
+requires-python = ">=3.10"
+dependencies = ["pyserial", "bleak"]
+
+[project.scripts]
+obd12 = "obd12.__main__:main"
+
+[tool.setuptools]
+packages = ["obd12", "obd12.transports"]
