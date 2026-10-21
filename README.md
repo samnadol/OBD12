@@ -52,7 +52,7 @@ cd software/web
 python3 -m http.server     # http://localhost:8000
 ```
 
-Pushes to `master` that touch `software/web/` publish it to GitHub Pages (`.github/workflows/pages.yml`) at https://samnadol.github.io/obd12/.
+Pushes to `master` that touch `software/web/` publish it to GitHub Pages (`.github/workflows/pages.yml`) at https://samnadol.github.io/OBD12/.
 
 ## Known issues
 
