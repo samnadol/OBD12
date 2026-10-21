@@ -23,7 +23,11 @@
 #define OBD_RESPONSE_WINDOW_MS   50     // P2_CAN, ISO 15765-4
 #define OBD_RESPONSE_PENDING_MS  5000   // P2*_CAN, after NRC 0x78
 #define OBD_RESULT_MAX           236    // bytes of records per request
-#define OBD_LIVE_MAX_PIDS        16
+#define OBD_LIVE_MAX_PIDS        32
+
+// supported mode 01 PIDs, as the concatenated answers to PIDs 0x00, 0x20, ... 0xE0:
+// PID p (0x01-0xFF) is supported if bitmap[(p - 1) / 8] & (0x80 >> ((p - 1) % 8))
+#define OBD_PID_BITMAP_LEN       32
 
 #define OBD_NEGATIVE_RESPONSE 0x7F
 #define OBD_NRC_RESPONSE_PENDING 0x78
@@ -68,6 +72,7 @@ typedef enum
 	OBD_KIND_HOST_VIN = 1,      // VIN request from a host, result goes to OBD_OnRequestDone()
 	OBD_KIND_LIVE = 2,          // internal: live data polling
 	OBD_KIND_VIN = 3,           // internal: VIN read at startup
+	OBD_KIND_PIDS = 4,          // internal: supported PID discovery
 } obd_kind_t;
 
 typedef struct
@@ -89,6 +94,14 @@ bool OBD_Submit(const obd_request_t *req);
 // true (and copies 17 characters) once the VIN is known
 bool OBD_GetVin(char vin[17]);
 
+// supported mode 01 PID discovery: asks for PIDs 0x00, 0x20, ... for as long as
+// some ECU reports the next range as supported. Runs at startup; call
+// OBD_DiscoverPids() to retry after it failed (e.g. ignition was off).
+// OBD_OnPidsDiscovered() reports the result.
+void OBD_DiscoverPids(void);
+// true (and copies OBD_PID_BITMAP_LEN bytes) once the supported PIDs are known
+bool OBD_GetSupportedPids(uint8_t bitmap[OBD_PID_BITMAP_LEN]);
+
 // live polling of mode 01 PIDs; only runs while started
 void OBD_LiveStart(uint16_t interval_ms, const uint8_t *pids, uint8_t count);
 void OBD_LiveStop(void);
@@ -97,6 +110,9 @@ bool OBD_LiveActive(void);
 // implemented by the application:
 // a host request finished
 void OBD_OnRequestDone(const obd_request_t *req, obd_status_t status, const uint8_t *records, uint16_t records_len);
+// supported PID discovery finished: OBD_STATUS_OK once the PIDs are known,
+// otherwise why not (no ECU answered PID 0x00, or the request could not be sent)
+void OBD_OnPidsDiscovered(obd_status_t status);
 // one live polling cycle finished; records are [pid u8][len u8][data] (data excludes 0x41 and the PID)
 void OBD_OnLiveData(const uint8_t *records, uint16_t records_len);
 

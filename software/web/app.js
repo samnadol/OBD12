@@ -3,16 +3,22 @@
  * log, ping, reset, clear-bonds) over one connection that stays open. If the
  * link drops, it reconnects to the same device without the picker, and the
  * Device restores event subscriptions and live polling.
+ *
+ * On every (re)connection it reads the VIN and the mode 01 PIDs the vehicle
+ * supports; those PIDs become the choices in the live data section.
  */
 
 import {
 	BleTransport, CAN_STATES, Device, DeviceError, Err, FAULTS, InfoFlag, OBD_ID_BROADCAST, RESET_CAUSES,
 	SerialTransport, Topic, toHex,
 } from "./obd12.js";
-import { PIDS, decode, decodeDtcs, display } from "./pids.js";
+import { PIDS, decode, decodeDtcs, display, displayUnit, isRangePid, pidLabel, pidsFromBitmap } from "./pids.js";
 
 const DEFAULT_LIVE_PIDS = [0x0C, 0x0D, 0x05, 0x0F, 0x11];
-const MAX_LIVE_PIDS = 16;
+const MAX_LIVE_PIDS = 32;
+
+// live data choices until a vehicle's supported PIDs have been read
+const FALLBACK_PIDS = [0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x1F, 0x2F, 0x42, 0x46, 0x5C];
 const MIN_INTERVAL_MS = 50;
 const RECONNECT_MAX_DELAY_MS = 10000;
 const LOG_MAX_LINES = 2000;
@@ -24,6 +30,8 @@ const USB_REBOOT_MS = 3000;
 const OBD_PRESETS = [
 	["Supported PIDs", "01 00"],
 	["RPM", "01 0C"],
+	["Fuel rail pressure", "01 23"],
+	["Fuel pressure control", "01 6D"],
 	["Stored DTCs", "03"],
 	["Pending DTCs", "07"],
 	["VIN", "09 02"],
@@ -92,6 +100,7 @@ const settings = {
 	imperial: load("imperial", false),
 	log: load("log", false),
 	tab: load("tab", "live"),
+	supported: load("supported", null),    // the last vehicle's supported PIDs, without 0x00, 0x20, ...
 };
 
 // --- toast and log ---
@@ -230,6 +239,7 @@ async function connect(Transport) {
 	setState("connected");
 	logLine(`Connected over ${transport.kind}`, "app");
 	refreshInfo();
+	loadVehicle();
 }
 
 function bindEvents(session) {
@@ -259,6 +269,7 @@ async function reconnect(session) {
 			setState("connected");
 			logLine("Reconnected", "app");
 			refreshInfo();
+			loadVehicle();
 			return;
 		} catch {
 			// opened but restoring failed: start over cleanly
@@ -283,6 +294,9 @@ async function disconnect() {
 	staleTimer = null;
 	releaseWakeLock();
 	stopRecording();
+	supportedFresh = false;
+	scanFailed = false;
+	updatePidStatus();
 	if (session) {
 		await session.close().catch(() => {});
 		logLine("Disconnected", "app");
@@ -310,11 +324,19 @@ let staleTimer = null;
 let restartTimer = null;
 let wakeLock = null;
 
+// the chips: the vehicle's supported PIDs, once known
+const chipPids = () => settings.supported ?? FALLBACK_PIDS;
+
+const selectedPids = () => settings.pids.filter(p => chipPids().includes(p));
+
 function livePids() {
 	const extra = parseHex(settings.extra);
 	if (extra === null)
 		throw new Error("Other PIDs: enter hex bytes, e.g. 1C 33");
-	return [...new Set([...settings.pids, ...extra])].slice(0, MAX_LIVE_PIDS);
+	const pids = [...new Set([...selectedPids(), ...extra])];
+	if (pids.length > MAX_LIVE_PIDS)
+		throw new Error(`Choose at most ${MAX_LIVE_PIDS} PIDs.`);
+	return pids;
 }
 
 function liveInterval() {
@@ -332,47 +354,69 @@ function updateLiveButton() {
 function renderPidChips() {
 	const chips = $("pid-chips");
 	chips.replaceChildren();
-	for (const info of PIDS.values()) {
-		const b = el("button", "", info.label);
-		b.setAttribute("aria-pressed", settings.pids.includes(info.pid));
+	for (const pid of chipPids()) {
+		const b = el("button", "", pidLabel(pid));
+		b.title = `PID ${hex2(pid)}`;
+		b.setAttribute("aria-pressed", settings.pids.includes(pid));
 		b.addEventListener("click", () => {
-			settings.pids = settings.pids.includes(info.pid)
-				? settings.pids.filter(p => p !== info.pid)
-				: [...settings.pids, info.pid];
+			const selected = settings.pids.includes(pid);
+			if (!selected && selectedPids().length >= MAX_LIVE_PIDS) {
+				toast(`At most ${MAX_LIVE_PIDS} PIDs at a time.`);
+				return;
+			}
+			settings.pids = selected ? settings.pids.filter(p => p !== pid) : [...settings.pids, pid];
 			save("pids", settings.pids);
-			b.setAttribute("aria-pressed", settings.pids.includes(info.pid));
+			b.setAttribute("aria-pressed", !selected);
+			updatePidStatus();
 			liveConfigChanged();
 		});
 		chips.append(b);
 	}
+	updatePidStatus();
 }
 
+// one tile per field of a known PID, one tile of raw bytes for any other PID
 function renderTiles(pids) {
 	const tiles = $("live-tiles");
 	tiles.replaceChildren();
 	for (const pid of pids) {
-		const tile = el("div", "tile stale");
-		tile.dataset.pid = pid;
-		tile.append(el("div", "label", PIDS.get(pid)?.label ?? `PID ${hex2(pid)}`), el("div", "value", "—"));
-		tiles.append(tile);
+		const fields = PIDS.get(pid)?.fields ?? [];
+		const labels = fields.length ? fields.map(f => f.label) : [pidLabel(pid)];
+		for (const label of labels) {
+			const tile = el("div", "tile stale");
+			tile.dataset.pid = pid;
+			tile.append(el("div", "label", label), el("div", "value", "—"));
+			tiles.append(tile);
+		}
 		if (liveData.has(pid))
-			renderTile(tile, liveData.get(pid).data);
+			renderPid(pid, liveData.get(pid).data);
 	}
 }
 
-function renderTile(tile, data) {
-	const pid = Number(tile.dataset.pid);
-	const value = tile.querySelector(".value");
+function renderPid(pid, data) {
+	const tiles = $("live-tiles").querySelectorAll(`[data-pid="${pid}"]`);
+	const fields = PIDS.get(pid)?.fields ?? [];
 	const decoded = decode(pid, data);
-	if (!decoded) {
-		value.className = "value raw";
-		value.textContent = toHex(data) || "—";
-		return;
-	}
-	const shown = display(decoded, settings.imperial);
-	value.className = "value";
-	value.textContent = shown.value.toFixed(decoded.digits);
-	value.append(el("span", "unit", shown.unit));
+
+	tiles.forEach((tile, i) => {
+		const value = tile.querySelector(".value");
+		if (!decoded) {
+			tile.hidden = i > 0;
+			value.className = "value raw";
+			value.textContent = toHex(data) || "—";
+			return;
+		}
+
+		// fields the vehicle does not fill in (e.g. a second fuel rail) stay hidden
+		const field = decoded.find(f => f.name === fields[i].name);
+		tile.hidden = !field;
+		if (!field)
+			return;
+		const shown = display(field, settings.imperial);
+		value.className = "value";
+		value.textContent = shown.value.toFixed(shown.digits);
+		value.append(el("span", "unit", shown.unit));
+	});
 }
 
 function onLiveData(values) {
@@ -382,11 +426,9 @@ function onLiveData(values) {
 
 	for (const [pid, data] of values) {
 		liveData.set(pid, { data, seen: now });
-		const tile = $("live-tiles").querySelector(`[data-pid="${pid}"]`);
-		if (tile) {
-			renderTile(tile, data);
+		renderPid(pid, data);
+		for (const tile of $("live-tiles").querySelectorAll(`[data-pid="${pid}"]`))
 			tile.classList.remove("stale");
-		}
 	}
 
 	const rate = liveRate.length > 1 ? (liveRate.length - 1) / ((now - liveRate[0]) / 1000) : 0;
@@ -456,11 +498,8 @@ function setUnits(imperial) {
 	save("imperial", imperial);
 	for (const b of $("units").children)
 		b.setAttribute("aria-pressed", (b.dataset.units === "imperial") === imperial);
-	for (const tile of $("live-tiles").children) {
-		const entry = liveData.get(Number(tile.dataset.pid));
-		if (entry)
-			renderTile(tile, entry.data);
-	}
+	for (const [pid, entry] of liveData)
+		renderPid(pid, entry.data);
 }
 
 // --- recording ---
@@ -558,25 +597,60 @@ function updateRecordingUi() {
 		: "Records each live update as a CSV row, at the interval set above.";
 }
 
+// a column per field that occurs in the recording; PIDs without fields (or
+// with too little data) get a column of raw hex
+function recordingColumns() {
+	const columns = [];
+	for (const pid of recording.pids) {
+		const fields = PIDS.get(pid)?.fields ?? [];
+		const seen = new Set();
+		let raw = false, any = false;
+		for (const row of recording.rows) {
+			const data = row.values.get(pid);
+			if (!data)
+				continue;
+			any = true;
+			const decoded = decode(pid, data);
+			if (decoded)
+				decoded.forEach(f => seen.add(f.name));
+			else
+				raw = true;
+		}
+
+		const shown = fields.filter(f => seen.has(f.name) || (!any && !f.present));
+		for (const field of shown) {
+			const unit = displayUnit(field.unit, settings.imperial);
+			columns.push({ pid, field, header: unit ? `${field.name} (${unit})` : field.name });
+		}
+		if (raw || shown.length === 0)
+			columns.push({ pid, header: `pid_${hex2(pid)} (hex)` });
+	}
+	return columns;
+}
+
 function recordingCsv() {
-	const columns = recording.pids.map(pid => {
-		const info = PIDS.get(pid);
-		return info ? `${info.name} (${display({ value: 0, unit: info.unit }, settings.imperial).unit})` : `pid_${hex2(pid)} (hex)`;
-	});
-	const lines = [["time", "elapsed_s", ...columns].join(",")];
+	const columns = recordingColumns();
+	const lines = [["time", "elapsed_s", ...columns.map(c => c.header)].join(",")];
 
 	for (const row of recording.rows) {
 		const cells = [new Date(row.t).toISOString(), ((row.t - recording.start) / 1000).toFixed(3)];
-		for (const pid of recording.pids) {
+		for (const { pid, field } of columns) {
 			const data = row.values.get(pid);
 			const decoded = data && decode(pid, data);
-			cells.push(!data ? "" : decoded ? String(Number(display(decoded, settings.imperial).value.toFixed(3))) : toHex(data, ""));
+			if (!data) {
+				cells.push("");
+			} else if (field) {
+				const f = decoded?.find(f => f.name === field.name);
+				cells.push(f ? String(Number(display(f, settings.imperial).value.toFixed(3))) : "");
+			} else {
+				cells.push(decoded ? "" : toHex(data, ""));
+			}
 		}
 		lines.push(cells.join(","));
 	}
 
 	// the BOM makes Excel read the file (and the ° in units) as UTF-8
-	return "﻿" + lines.join("\r\n") + "\r\n";
+	return "\uFEFF" + lines.join("\r\n") + "\r\n";
 }
 
 function fileStamp(date) {
@@ -629,8 +703,10 @@ function describeResponse(msg) {
 		}
 		const decoded = decode(pid, msg.slice(2));
 		if (decoded) {
-			const shown = display(decoded, settings.imperial);
-			return `${decoded.label}: ${shown.value.toFixed(decoded.digits)} ${shown.unit}`;
+			return decoded.map(f => {
+				const shown = display(f, settings.imperial);
+				return `${f.label}: ${shown.value.toFixed(shown.digits)} ${shown.unit}`.trim();
+			}).join(" · ");
 		}
 	}
 	if (msg[0] === 0x43 || msg[0] === 0x47 || msg[0] === 0x4A) {
@@ -683,6 +759,66 @@ async function sendObd() {
 			throw e;
 		}
 	});
+}
+
+// --- vehicle discovery ---
+
+let supportedFresh = false;     // settings.supported was read from the connected vehicle
+let scanning = false;
+let scanFailed = false;
+
+async function loadVehicle() {
+	const session = dev;
+	try {
+		const vin = await session.getVin();
+		if (dev === session)
+			$("vin").textContent = vin;
+	} catch (e) {
+		logLine(`VIN: ${errorText(e)}`, "error");
+	}
+	if (dev === session)
+		await scanPids(false);
+}
+
+async function scanPids(fromButton) {
+	const session = dev;
+	scanning = true;
+	updatePidStatus();
+	try {
+		const supported = pidsFromBitmap(await session.getSupportedPidsBitmap()).filter(p => !isRangePid(p));
+		if (dev !== session)
+			return;
+		settings.supported = supported;
+		save("supported", supported);
+		supportedFresh = true;
+		scanFailed = false;
+		logLine(`Vehicle supports ${supported.length} PIDs: ${supported.map(hex2).join(" ")}`, "app");
+		renderPidChips();
+		liveConfigChanged();    // stops polling PIDs this vehicle does not have
+	} catch (e) {
+		scanFailed = true;
+		if (fromButton)
+			toastError(e);
+		else
+			logLine(`Supported PIDs: ${errorText(e)}`, "error");
+	} finally {
+		scanning = false;
+		updatePidStatus();
+	}
+}
+
+function updatePidStatus() {
+	const selected = `${selectedPids().length} selected`;
+	let text;
+	if (scanning)
+		text = "Reading the PIDs this vehicle supports…";
+	else if (settings.supported)
+		text = `${settings.supported.length} PIDs supported${supportedFresh ? "" : " (last vehicle)"} · ${selected}`;
+	else
+		text = `Common PIDs · ${selected}`;
+	if (scanFailed && !scanning)
+		text += " · no answer, turn the ignition on and scan again";
+	$("pid-status").textContent = text;
 }
 
 // --- device ---
@@ -782,6 +918,7 @@ function init() {
 		liveConfigChanged();
 	});
 	$("live-toggle").addEventListener("click", toggleLive);
+	$("pid-scan").addEventListener("click", () => action($("pid-scan"), () => scanPids(true)));
 	for (const b of $("units").children)
 		b.addEventListener("click", () => setUnits(b.dataset.units === "imperial"));
 	setUnits(settings.imperial);

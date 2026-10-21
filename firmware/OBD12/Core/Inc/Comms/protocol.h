@@ -55,8 +55,10 @@ typedef enum
 	CMD_OBD_REQUEST = 0x10,     // req: u16 dest, 1-7 request bytes   rsp: OBD records (see below)
 	                            //      [auth] unless the service is read-only (01,02,03,05,06,07,09,0A)
 	CMD_GET_VIN = 0x11,         // req: -                  rsp: 17 ASCII characters
-	CMD_LIVE_START = 0x12,      // req: u16 interval_ms, 1-16 mode 01 PIDs    rsp: -
+	CMD_LIVE_START = 0x12,      // req: u16 interval_ms, 1-32 mode 01 PIDs    rsp: -
 	CMD_LIVE_STOP = 0x13,       // req: -                  rsp: -
+	CMD_GET_SUPPORTED_PIDS = 0x14, // req: -               rsp: 32-byte bitmap of supported mode 01 PIDs:
+	                            //      PID p (0x01-0xFF) is supported if byte (p-1)/8 has bit 0x80 >> ((p-1)%8)
 } proto_cmd_t;
 
 typedef enum
@@ -114,6 +116,7 @@ typedef struct __attribute__((packed))
 #define INFO_FLAG_BLE_CONNECTED   0x02
 #define INFO_FLAG_AUTHORIZED      0x04   // the transport this answer is sent on
 #define INFO_FLAG_VIN_KNOWN       0x08
+#define INFO_FLAG_PIDS_KNOWN      0x10   // supported mode 01 PIDs discovered
 
 typedef struct __attribute__((packed))
 {

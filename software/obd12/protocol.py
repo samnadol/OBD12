@@ -31,6 +31,7 @@ class Cmd(IntEnum):
     GET_VIN = 0x11
     LIVE_START = 0x12
     LIVE_STOP = 0x13
+    GET_SUPPORTED_PIDS = 0x14
 
 
 class Evt(IntEnum):
@@ -90,6 +91,7 @@ class InfoFlag(IntFlag):
     BLE_CONNECTED = 0x02
     AUTHORIZED = 0x04
     VIN_KNOWN = 0x08
+    PIDS_KNOWN = 0x10
 
 
 OBD_ID_BROADCAST = 0x7DF

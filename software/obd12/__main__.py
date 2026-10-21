@@ -12,6 +12,7 @@ from .protocol import InfoFlag, Topic
 from .transports import BleTransport, UsbTransport
 
 DEFAULT_LIVE_PIDS = "0C,0D,05,0F,11"
+MAX_LIVE_PIDS = 32
 
 
 async def make_transport(args):
@@ -68,20 +69,38 @@ async def cmd_obd(dev: Device, args) -> None:
         print(f"0x{r.ecu_id:03X}: {r.message.hex(' ').upper()}  ({status})")
 
 
+async def supported_data_pids(dev: Device) -> list[int]:
+    return [p for p in await dev.get_supported_pids() if not pids.is_range_pid(p)]
+
+
+async def cmd_pids(dev: Device, args) -> None:
+    for pid in await supported_data_pids(dev):
+        info = pids.PIDS.get(pid)
+        fields = ", ".join(f"{f.name} ({f.unit})" if f.unit else f.name for f in info.fields) if info else ""
+        print(f"{pid:02X}  {pids.label(pid):34} {fields or 'raw'}")
+
+
 async def cmd_live(dev: Device, args) -> None:
     def show(values: dict[int, bytes]) -> None:
         parts = []
         for pid, data in values.items():
             decoded = pids.decode(pid, data)
-            if decoded:
-                name, value, unit = decoded
-                parts.append(f"{name}={value:.1f}{unit}")
-            else:
+            if decoded is None:
                 parts.append(f"{pid:02X}={data.hex()}")
+            for name, value, unit in decoded or []:
+                parts.append(f"{name}={value:.1f}{unit}")
         print("  ".join(parts), flush=True)
 
+    if args.pids == "supported":
+        selected = await supported_data_pids(dev)
+        if len(selected) > MAX_LIVE_PIDS:
+            print(f"polling the first {MAX_LIVE_PIDS} of {len(selected)} supported PIDs", file=sys.stderr)
+            selected = selected[:MAX_LIVE_PIDS]
+    else:
+        selected = parse_hex_list(args.pids)
+
     dev.on_live_data(show)
-    await dev.live_start(parse_hex_list(args.pids), args.interval)
+    await dev.live_start(selected, args.interval)
     try:
         await asyncio.Event().wait()
     finally:
@@ -117,6 +136,7 @@ COMMANDS = {
     "power": (cmd_power, "regulator status and voltages"),
     "can-stats": (cmd_can_stats, "CAN controller counters"),
     "vin": (cmd_vin, "vehicle identification number"),
+    "pids": (cmd_pids, "mode 01 PIDs the vehicle supports"),
     "obd": (cmd_obd, "raw OBD request, e.g. 'obd 01,0C'"),
     "live": (cmd_live, "stream live data until Ctrl+C"),
     "log": (cmd_log, "show device log output until Ctrl+C"),
@@ -140,7 +160,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("request", help="request bytes in hex, e.g. 01,0C")
             p.add_argument("--dest", default="7DF", help="destination CAN ID in hex (default 7DF, broadcast)")
         elif name == "live":
-            p.add_argument("--pids", default=DEFAULT_LIVE_PIDS, help=f"mode 01 PIDs in hex (default {DEFAULT_LIVE_PIDS})")
+            p.add_argument("--pids", default=DEFAULT_LIVE_PIDS,
+                           help=f"mode 01 PIDs in hex, or 'supported' for all the vehicle supports (default {DEFAULT_LIVE_PIDS})")
             p.add_argument("--interval", type=int, default=500, help="polling interval in ms (default 500)")
 
     # "--ble info": argparse would take the command as the optional ADDRESS/PORT

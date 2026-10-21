@@ -43,7 +43,9 @@ python -m obd12 info          # USB, auto-detected
 python -m obd12 --ble live    # BLE
 ```
 
-Commands: `info`, `power`, `can-stats`, `vin`, `obd`, `live`, `log`, `ping`, `reset`, `clear-bonds`.
+Commands: `info`, `power`, `can-stats`, `vin`, `pids`, `obd`, `live`, `log`, `ping`, `reset`, `clear-bonds`.
+
+The firmware reads the VIN and the vehicle's supported mode 01 PIDs at startup. `pids` lists them, and `live --pids supported` polls all of them (up to 32). The web app reads both when it connects and offers every supported PID in its live data section.
 
 `software/web/` is a browser version of the CLI using Web Bluetooth (Bluefy on iOS, Chrome or Edge elsewhere) or Web Serial for USB (desktop Chrome or Edge). It keeps one connection open and reconnects on its own. It has no build step, but it must be served over HTTPS or from `localhost`:
 

@@ -29,6 +29,7 @@ export const Cmd = Object.freeze({
 	GET_VIN: 0x11,
 	LIVE_START: 0x12,
 	LIVE_STOP: 0x13,
+	GET_SUPPORTED_PIDS: 0x14,
 });
 
 export const Evt = Object.freeze({ LOG: 0x80, POWER: 0x81, CAN_STATUS: 0x82, LIVE_DATA: 0x83 });
@@ -45,7 +46,7 @@ export const Err = Object.freeze({
 	UNAVAILABLE: 0x07,
 });
 
-export const InfoFlag = Object.freeze({ BLE_AVAILABLE: 0x01, BLE_CONNECTED: 0x02, AUTHORIZED: 0x04, VIN_KNOWN: 0x08 });
+export const InfoFlag = Object.freeze({ BLE_AVAILABLE: 0x01, BLE_CONNECTED: 0x02, AUTHORIZED: 0x04, VIN_KNOWN: 0x08, PIDS_KNOWN: 0x10 });
 
 export const RESET_CAUSES = ["unknown", "power-on", "reset pin", "software", "watchdog", "window watchdog", "low-power", "fatal error"];
 export const FAULTS = ["none", "Error_Handler", "HardFault", "MemManage", "BusFault", "UsageFault", "NMI"];
@@ -426,6 +427,36 @@ export class Device {
 
 	async getVin() {
 		return new TextDecoder("ascii").decode(await this.request(Cmd.GET_VIN, undefined, OBD_TIMEOUT_MS));
+	}
+
+	// supported mode 01 PIDs, 32-byte bitmap: PID p is bit 0x80 >> ((p-1) % 8) of byte (p-1) / 8
+	async getSupportedPidsBitmap() {
+		try {
+			return await this.request(Cmd.GET_SUPPORTED_PIDS, undefined, OBD_TIMEOUT_MS);
+		} catch (e) {
+			if (!(e instanceof DeviceError && e.code === Err.UNKNOWN_CMD))
+				throw e;
+		}
+
+		// firmware before 0.3.0: ask the ECUs for PIDs 0x00, 0x20, ... directly
+		const bitmap = new Uint8Array(32);
+		for (let range = 0x00; range <= 0xE0; range += 0x20) {
+			let responses;
+			try {
+				responses = await this.obdRequest(Uint8Array.of(0x01, range));
+			} catch (e) {
+				if (range === 0x00 || !(e instanceof DeviceError && e.code === Err.TIMEOUT))
+					throw e;
+				break;
+			}
+			for (const r of responses)
+				if (r.message.length >= 6 && r.message[0] === 0x41 && r.message[1] === range)
+					for (let i = 0; i < 4; i++)
+						bitmap[range / 8 + i] |= r.message[2 + i];
+			if (!(bitmap[range / 8 + 3] & 0x01))
+				break;
+		}
+		return bitmap;
 	}
 
 	// starts (or reconfigures) live polling of mode 01 PIDs; results arrive via onLiveData()

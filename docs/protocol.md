@@ -57,8 +57,9 @@ Every REQ gets exactly one RSP or ERR with the same `seq` and `id`. Requests may
 | `0x07` | BLE_CLEAR_BONDS | – | – | yes |
 | `0x10` | OBD_REQUEST | `dest u16`, 1–7 request bytes | OBD records | for services other than 01, 02, 03, 05, 06, 07, 09, 0A |
 | `0x11` | GET_VIN | – | 17 ASCII characters | |
-| `0x12` | LIVE_START | `interval_ms u16`, 1–16 mode 01 PIDs | – | |
+| `0x12` | LIVE_START | `interval_ms u16`, 1–32 mode 01 PIDs | – | |
 | `0x13` | LIVE_STOP | – | – | |
+| `0x14` | GET_SUPPORTED_PIDS | – | 32-byte bitmap of supported mode 01 PIDs (below) | |
 
 ### Authorization
 
@@ -82,9 +83,23 @@ The response is a list of records, one per answering ECU:
 
 No answer at all gives `ERR TIMEOUT`. CAN being unusable (bus-off, TX failure) gives `ERR CAN`. A full request queue gives `ERR BUSY`.
 
+### GET_VIN and GET_SUPPORTED_PIDS
+
+At startup the device reads the VIN (mode 09 PID 02) and the supported mode 01 PIDs, and keeps both for as long as it is powered.
+
+- **Supported PIDs:** the device asks for PID `0x00`, then `0x20`, `0x40`, … up to `0xE0`. It moves to the next range only while some ECU reports that range as supported (the last bit of the previous answer). Answers from all ECUs are combined.
+- **Bitmap:** the 32 bytes are the A–D data bytes of the answers to `0x00`, `0x20`, … `0xE0`, one after another. PID `p` (`0x01`–`0xFF`) is supported if byte `(p − 1) / 8` has bit `0x80 >> ((p − 1) % 8)` set. The range PIDs (`0x20`, `0x40`, …) appear as supported when the next range exists; they carry no data.
+- **If the startup read failed:** for example, the ignition was off. A `GET_VIN` or `GET_SUPPORTED_PIDS` request then reads again and answers when done, or with `ERR TIMEOUT` if no ECU answered. Allow several seconds.
+- **Older firmware:** firmware before 0.3.0 answers `GET_SUPPORTED_PIDS` with `UNKNOWN_CMD`. The host clients then send `01 00`, `01 20`, … through `OBD_REQUEST` themselves.
+
 ### LIVE_START / LIVE_STOP
 
-The device polls the listed mode 01 PIDs one after another on the broadcast address. After each pass, at most once per `interval_ms` (minimum 50 ms), it sends an `EVT_LIVE_DATA`.
+The device polls the listed mode 01 PIDs. One pass covers every listed PID.
+
+- **First pass:** each PID is requested on its own on the broadcast address, which waits out the 50 ms response window. The answers show which ECU answers each PID and how many data bytes it has.
+- **Later passes:** learned PIDs are requested up to six per request (SAE J1979), physically addressed to the ECU that answers them. That ECU answers within a few ms, so a pass of 32 learned PIDs takes a few tens of ms instead of about 1.6 s.
+- **Fallback:** a batched PID that does not come back is requested on its own again in the same pass. After three such failures the PID stays on single broadcast requests. PIDs no ECU answers stay on single broadcast requests too, and each costs 50 ms per pass. Hosts should only ask for supported PIDs.
+- **Event order:** the records in an `EVT_LIVE_DATA` are not necessarily in the order of the `LIVE_START` list. After each pass, at most once per `interval_ms` (minimum 50 ms), it sends an `EVT_LIVE_DATA`.
 
 - One polling configuration is shared by all hosts; the latest `LIVE_START` wins.
 - Polling stops when no host is subscribed. A host's subscription ends when it sends `LIVE_STOP`, disconnects (BLE), or sends no request for **30 s**. While streaming, send a `PING` every ~10 s to keep the subscription alive.
@@ -127,7 +142,7 @@ Topics for `SET_EVENTS` are bit flags: `0x01` LOG, `0x02` POWER, `0x04` CAN_STAT
 | 8 | u32 | fault detail (SCB->CFSR for CPU faults) |
 | 12 | u32 × 3 | STM32 UID (zero on unauthorized links) |
 | 24 | u8 × 6 | BLE address, most significant byte first |
-| 30 | u8 | flags: `0x01` BLE available, `0x02` BLE connected, `0x04` this link is authorized, `0x08` VIN known |
+| 30 | u8 | flags: `0x01` BLE available, `0x02` BLE connected, `0x04` this link is authorized, `0x08` VIN known, `0x10` supported PIDs known |
 | 31 | u8 | reserved |
 | 32 | u32 | BLE passkey (USB only, otherwise 0) |
 

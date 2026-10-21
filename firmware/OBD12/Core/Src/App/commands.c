@@ -23,6 +23,13 @@
 
 static uint32_t last_request_tick[TRANSPORT_COUNT];
 
+// GET_SUPPORTED_PIDS requests waiting for the discovery, one per transport
+static struct
+{
+	bool waiting;
+	uint8_t seq;
+} pids_waiter[TRANSPORT_COUNT];
+
 static bool reset_pending;
 static uint32_t reset_requested_tick;
 
@@ -68,6 +75,7 @@ static void handle_get_info(transport_id_t t, uint8_t seq)
 {
 	proto_info_t info = { 0 };
 	char vin[17];
+	uint8_t bitmap[OBD_PID_BITMAP_LEN];
 
 	info.proto_version = PROTO_VERSION;
 	info.fw_major = FW_VERSION_MAJOR;
@@ -101,6 +109,8 @@ static void handle_get_info(transport_id_t t, uint8_t seq)
 		info.flags |= INFO_FLAG_AUTHORIZED;
 	if (OBD_GetVin(vin))
 		info.flags |= INFO_FLAG_VIN_KNOWN;
+	if (OBD_GetSupportedPids(bitmap))
+		info.flags |= INFO_FLAG_PIDS_KNOWN;
 
 	comms_reply(t, seq, CMD_GET_INFO, &info, sizeof(info));
 }
@@ -168,6 +178,34 @@ static void handle_get_vin(transport_id_t t, uint8_t seq)
 
 	if (!OBD_Submit(&req))
 		comms_error(t, seq, CMD_GET_VIN, ERR_BUSY);
+}
+
+static void handle_get_supported_pids(transport_id_t t, uint8_t seq)
+{
+	uint8_t bitmap[OBD_PID_BITMAP_LEN];
+	if (OBD_GetSupportedPids(bitmap))
+	{
+		comms_reply(t, seq, CMD_GET_SUPPORTED_PIDS, bitmap, sizeof(bitmap));
+		return;
+	}
+
+	if (!can_usable())
+	{
+		comms_error(t, seq, CMD_GET_SUPPORTED_PIDS, ERR_CAN);
+		return;
+	}
+
+	if (pids_waiter[t].waiting)
+	{
+		comms_error(t, seq, CMD_GET_SUPPORTED_PIDS, ERR_BUSY);
+		return;
+	}
+
+	// answered by OBD_OnPidsDiscovered(); a discovery that already runs (e.g.
+	// the one at startup) answers this request too
+	pids_waiter[t].waiting = true;
+	pids_waiter[t].seq = seq;
+	OBD_DiscoverPids();
 }
 
 static void handle_live_start(transport_id_t t, uint8_t seq, const uint8_t *p, uint16_t len)
@@ -276,6 +314,10 @@ void commands_handle(transport_id_t t, uint8_t seq, uint8_t id, const uint8_t *p
 		comms_reply(t, seq, id, NULL, 0);
 		break;
 
+	case CMD_GET_SUPPORTED_PIDS:
+		handle_get_supported_pids(t, seq);
+		break;
+
 	default:
 		comms_error(t, seq, id, ERR_UNKNOWN_CMD);
 		break;
@@ -326,6 +368,25 @@ void OBD_OnRequestDone(const obd_request_t *req, obd_status_t status, const uint
 		comms_error(t, req->seq, id, ERR_TIMEOUT);
 	else
 		comms_reply(t, req->seq, id, records, records_len);
+}
+
+void OBD_OnPidsDiscovered(obd_status_t status)
+{
+	uint8_t bitmap[OBD_PID_BITMAP_LEN];
+	bool known = OBD_GetSupportedPids(bitmap);
+
+	for (int t = 0; t < TRANSPORT_COUNT; t++)
+	{
+		if (!pids_waiter[t].waiting)
+			continue;
+		pids_waiter[t].waiting = false;
+
+		if (known)
+			comms_reply((transport_id_t) t, pids_waiter[t].seq, CMD_GET_SUPPORTED_PIDS, bitmap, sizeof(bitmap));
+		else
+			comms_error((transport_id_t) t, pids_waiter[t].seq, CMD_GET_SUPPORTED_PIDS,
+					status == OBD_STATUS_TX_FAILED ? ERR_CAN : ERR_TIMEOUT);
+	}
 }
 
 void OBD_OnLiveData(const uint8_t *records, uint16_t records_len)
