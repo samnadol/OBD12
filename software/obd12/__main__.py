@@ -143,6 +143,12 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--pids", default=DEFAULT_LIVE_PIDS, help=f"mode 01 PIDs in hex (default {DEFAULT_LIVE_PIDS})")
             p.add_argument("--interval", type=int, default=500, help="polling interval in ms (default 500)")
 
+    # "--ble info": argparse would take the command as the optional ADDRESS/PORT
+    argv = list(sys.argv[1:] if argv is None else argv)
+    for i, arg in enumerate(argv[:-1]):
+        if arg in ("--usb", "--ble") and argv[i + 1] in COMMANDS:
+            argv[i] = arg + "="
+
     args = parser.parse_args(argv)
     handler = COMMANDS[args.command][0]
 

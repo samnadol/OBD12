@@ -45,6 +45,15 @@ python -m obd12 --ble live    # BLE
 
 Commands: `info`, `power`, `can-stats`, `vin`, `obd`, `live`, `log`, `ping`, `reset`, `clear-bonds`.
 
+`software/web/` is a browser version of the CLI using Web Bluetooth (Bluefy on iOS, Chrome or Edge elsewhere) or Web Serial for USB (desktop Chrome or Edge). It keeps one connection open and reconnects on its own. It has no build step, but it must be served over HTTPS or from `localhost`:
+
+```
+cd software/web
+python3 -m http.server     # http://localhost:8000
+```
+
+Pushes to `master` that touch `software/web/` publish it to GitHub Pages (`.github/workflows/pages.yml`) at https://samnadol.github.io/obd12/.
+
 ## Known issues
 
 - No output capacitor directly on the USB LDO output (`USB_REG_OUT`).

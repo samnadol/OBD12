@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>OBD12</title>
+	<link rel="stylesheet" href="style.css">
+	<script type="module" src="app.js"></script>
+</head>
+<body>
+	<header class="topbar">
+		<div class="brand">OBD12</div>
+		<div class="status" id="status" data-state="disconnected">
+			<span class="dot"></span><span id="status-text">Disconnected</span>
+		</div>
+		<span class="chip" id="can-chip" hidden></span>
+		<div class="conn">
+			<button id="connect-ble" class="primary">Connect</button>
+			<button id="connect-usb" hidden>USB</button>
+			<button id="disconnect" hidden>Disconnect</button>
+		</div>
+	</header>
+
+	<p class="notice" id="unsupported" hidden>
+		This browser can't use Bluetooth. On iPhone, open this page in Bluefy. On a computer, use Chrome or Edge.
+	</p>
+
+	<nav class="tabs" role="tablist">
+		<button role="tab" data-tab="live" aria-selected="true">Live</button>
+		<button role="tab" data-tab="vehicle">Vehicle</button>
+		<button role="tab" data-tab="device">Device</button>
+		<button role="tab" data-tab="log">Log</button>
+	</nav>
+
+	<main>
+		<section class="panel" id="tab-live">
+			<div class="card">
+				<div class="card-head">
+					<h2>Live data</h2>
+					<div class="segmented" id="units">
+						<button data-units="metric">Metric</button>
+						<button data-units="imperial">Imperial</button>
+					</div>
+				</div>
+				<div class="chips" id="pid-chips"></div>
+				<div class="fields">
+					<label>Other PIDs
+						<input id="live-extra" placeholder="hex, e.g. 1C 33" autocomplete="off" autocapitalize="characters" spellcheck="false">
+					</label>
+					<label class="narrow">Interval (ms)
+						<input id="live-interval" type="number" inputmode="numeric" min="50" step="50" value="500">
+					</label>
+				</div>
+				<button id="live-toggle" class="primary wide needs-link" disabled>Start</button>
+			</div>
+			<div class="tiles" id="live-tiles"></div>
+			<p class="meta" id="live-meta"></p>
+		</section>
+
+		<section class="panel" id="tab-vehicle" hidden>
+			<div class="card">
+				<div class="card-head">
+					<h2>VIN</h2>
+					<button id="vin-read" class="needs-link" disabled>Read</button>
+				</div>
+				<output class="vin mono" id="vin">—</output>
+			</div>
+
+			<div class="card">
+				<h2>OBD request</h2>
+				<div class="chips" id="obd-presets"></div>
+				<div class="fields">
+					<label>Request bytes
+						<input id="obd-request" placeholder="hex, e.g. 01 0C" autocomplete="off" autocapitalize="characters" spellcheck="false">
+					</label>
+					<label class="narrow">Destination
+						<select id="obd-dest"></select>
+					</label>
+				</div>
+				<button id="obd-send" class="primary wide needs-link" disabled>Send</button>
+			</div>
+			<div id="obd-results"></div>
+		</section>
+
+		<section class="panel" id="tab-device" hidden>
+			<div class="card">
+				<div class="card-head">
+					<h2>Device information</h2>
+					<button id="info-refresh" class="needs-link" disabled>Refresh</button>
+				</div>
+				<dl class="kv" id="info"></dl>
+			</div>
+
+			<div class="card">
+				<div class="card-head">
+					<h2>Power</h2>
+					<button id="power-refresh" class="needs-link" disabled>Refresh</button>
+				</div>
+				<label class="switch"><input type="checkbox" id="power-stream"> Update every second</label>
+				<dl class="kv" id="power"></dl>
+			</div>
+
+			<div class="card">
+				<div class="card-head">
+					<h2>CAN statistics</h2>
+					<button id="can-refresh" class="needs-link" disabled>Refresh</button>
+				</div>
+				<dl class="kv" id="can-stats"></dl>
+			</div>
+
+			<div class="card">
+				<div class="card-head">
+					<h2>Ping</h2>
+					<button id="ping" class="needs-link" disabled>Ping</button>
+				</div>
+				<output class="meta" id="ping-result"></output>
+			</div>
+
+			<div class="card">
+				<h2>Maintenance</h2>
+				<p class="meta">Over BLE these need a paired link. The first attempt asks the phone to pair; enter the passkey shown by <code>obd12 info</code> over USB, then try again.</p>
+				<div class="actions">
+					<button id="reset" class="danger needs-link" data-confirm="Tap again to reboot" disabled>Reboot device</button>
+					<button id="clear-bonds" class="danger needs-link" data-confirm="Tap again to forget all" disabled>Forget BLE bonds</button>
+				</div>
+			</div>
+		</section>
+
+		<section class="panel" id="tab-log" hidden>
+			<div class="card log-card">
+				<div class="card-head">
+					<label class="switch"><input type="checkbox" id="log-enable"> Device log</label>
+					<button id="log-clear">Clear</button>
+				</div>
+				<div class="log mono" id="log" role="log"></div>
+			</div>
+		</section>
+	</main>
+
+	<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
