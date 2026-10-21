@@ -92,7 +92,7 @@ button.danger {
 	color: var(--bad);
 }
 
-button.danger.armed {
+button.armed {
 	background: var(--bad);
 	border-color: var(--bad);
 	color: #fff;
@@ -382,6 +382,14 @@ main {
 	color: var(--muted);
 	margin-left: 4px;
 	font-weight: 500;
+}
+
+.rec-dot {
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	background: var(--bad);
+	animation: pulse 1s ease-in-out infinite alternate;
 }
 
 /* --- vehicle --- */

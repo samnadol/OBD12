@@ -151,8 +151,17 @@ async function action(button, fn) {
 		toastError(e);
 	} finally {
 		if (button)
-			button.disabled = !connected();
+			button.disabled = false;
+		refreshControls();
 	}
+}
+
+// enables the buttons that make sense in the current state
+function refreshControls() {
+	for (const b of document.querySelectorAll(".needs-link"))
+		b.disabled = !connected();
+	updateLiveButton();
+	updateRecordingUi();
 }
 
 // --- connection ---
@@ -181,9 +190,7 @@ function setState(s) {
 	if (!dev)
 		$("can-chip").hidden = true;
 
-	for (const b of document.querySelectorAll(".needs-link"))
-		b.disabled = !connected();
-	updateLiveButton();
+	refreshControls();
 }
 
 function desiredTopics() {
@@ -275,6 +282,7 @@ async function disconnect() {
 	clearInterval(staleTimer);
 	staleTimer = null;
 	releaseWakeLock();
+	stopRecording();
 	if (session) {
 		await session.close().catch(() => {});
 		logLine("Disconnected", "app");
@@ -370,6 +378,7 @@ function renderTile(tile, data) {
 function onLiveData(values) {
 	const now = performance.now();
 	liveRate = [...liveRate.filter(t => now - t < 5000), now];
+	record(values);
 
 	for (const [pid, data] of values) {
 		liveData.set(pid, { data, seen: now });
@@ -410,6 +419,7 @@ async function toggleLive() {
 			clearInterval(staleTimer);
 			staleTimer = null;
 			releaseWakeLock();
+			stopRecording();
 			await dev.liveStop();
 		} else {
 			await startLive();
@@ -451,6 +461,157 @@ function setUnits(imperial) {
 		if (entry)
 			renderTile(tile, entry.data);
 	}
+}
+
+// --- recording ---
+//
+// Every EVT_LIVE_DATA becomes one row, so rows come at the live interval (or
+// slower, if a polling pass takes longer). Raw bytes are kept and decoded on
+// save, in the units selected then.
+
+const recording = { active: false, start: 0, pids: [], rows: [], saved: true };
+let recTimer = null;
+let recArmTimer = null;
+
+const hasUnsaved = () => !recording.saved && recording.rows.length > 0;
+
+function record(values) {
+	if (!recording.active)
+		return;
+	recording.rows.push({ t: Date.now(), values });
+	for (const pid of values.keys())
+		if (!recording.pids.includes(pid))
+			recording.pids.push(pid);
+	updateRecordingUi();
+}
+
+async function startRecording() {
+	await action($("rec-toggle"), async () => {
+		if (!dev.live)
+			await startLive();
+	});
+	if (!dev?.live)
+		return;
+
+	let pids = [];
+	try {
+		pids = livePids();
+	} catch { }
+	Object.assign(recording, { active: true, start: Date.now(), pids, rows: [], saved: false });
+	recTimer = setInterval(updateRecordingUi, 1000);
+	logLine("Recording started", "app");
+	updateRecordingUi();
+}
+
+function stopRecording() {
+	if (!recording.active)
+		return;
+	recording.active = false;
+	clearInterval(recTimer);
+	recTimer = null;
+	logLine(`Recording stopped, ${recording.rows.length} samples`, "app");
+	updateRecordingUi();
+}
+
+// starting over discards an unsaved recording, so that takes a second tap
+function onRecordClick() {
+	const b = $("rec-toggle");
+	if (recording.active) {
+		stopRecording();
+		return;
+	}
+	if (hasUnsaved() && !b.classList.contains("armed")) {
+		b.classList.add("armed");
+		b.textContent = b.dataset.confirm;
+		recArmTimer = setTimeout(() => {
+			b.classList.remove("armed");
+			updateRecordingUi();
+		}, 3000);
+		return;
+	}
+	clearTimeout(recArmTimer);
+	b.classList.remove("armed");
+	startRecording();
+}
+
+function formatDuration(seconds) {
+	const s = Math.max(0, Math.floor(seconds));
+	const mmss = `${Math.floor(s / 60) % 60}`.padStart(s >= 3600 ? 2 : 1, "0") + ":" + `${s % 60}`.padStart(2, "0");
+	return s >= 3600 ? `${Math.floor(s / 3600)}:${mmss}` : mmss;
+}
+
+function updateRecordingUi() {
+	const b = $("rec-toggle");
+	const n = recording.rows.length;
+	if (!b.classList.contains("armed"))
+		b.textContent = recording.active ? "Stop" : "Record";
+	b.disabled = !recording.active && !connected();
+	$("rec-save").disabled = recording.active || n === 0;
+	$("rec-discard").disabled = recording.active || n === 0;
+	$("rec-dot").hidden = !recording.active;
+
+	const end = recording.active ? Date.now() : recording.rows.at(-1)?.t ?? recording.start;
+	const summary = `${n.toLocaleString()} samples · ${formatDuration((end - recording.start) / 1000)}`;
+	$("rec-status").textContent = recording.active
+		? `Recording · ${summary}`
+		: n ? `${summary} · ${recording.saved ? "saved" : "not saved"}`
+		: "Records each live update as a CSV row, at the interval set above.";
+}
+
+function recordingCsv() {
+	const columns = recording.pids.map(pid => {
+		const info = PIDS.get(pid);
+		return info ? `${info.name} (${display({ value: 0, unit: info.unit }, settings.imperial).unit})` : `pid_${hex2(pid)} (hex)`;
+	});
+	const lines = [["time", "elapsed_s", ...columns].join(",")];
+
+	for (const row of recording.rows) {
+		const cells = [new Date(row.t).toISOString(), ((row.t - recording.start) / 1000).toFixed(3)];
+		for (const pid of recording.pids) {
+			const data = row.values.get(pid);
+			const decoded = data && decode(pid, data);
+			cells.push(!data ? "" : decoded ? String(Number(display(decoded, settings.imperial).value.toFixed(3))) : toHex(data, ""));
+		}
+		lines.push(cells.join(","));
+	}
+
+	// the BOM makes Excel read the file (and the ° in units) as UTF-8
+	return "﻿" + lines.join("\r\n") + "\r\n";
+}
+
+function fileStamp(date) {
+	const p = n => String(n).padStart(2, "0");
+	return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
+}
+
+async function saveRecording() {
+	const name = `obd12-${fileStamp(new Date(recording.start))}.csv`;
+	const file = new File([recordingCsv()], name, { type: "text/csv" });
+
+	// on phones the share sheet is the way to a file ("Save to Files" on iOS)
+	if (matchMedia("(pointer: coarse)").matches && navigator.canShare?.({ files: [file] })) {
+		try {
+			await navigator.share({ files: [file] });
+			recording.saved = true;
+			updateRecordingUi();
+			return;
+		} catch (e) {
+			if (e.name === "AbortError")
+				return;
+			// otherwise fall back to a download
+		}
+	}
+
+	const url = URL.createObjectURL(file);
+	const a = el("a");
+	a.href = url;
+	a.download = name;
+	document.body.append(a);
+	a.click();
+	a.remove();
+	setTimeout(() => URL.revokeObjectURL(url), 10000);
+	recording.saved = true;
+	updateRecordingUi();
 }
 
 // --- vehicle ---
@@ -629,6 +790,15 @@ function init() {
 	} catch {
 		renderTiles(settings.pids);
 	}
+	$("rec-toggle").addEventListener("click", onRecordClick);
+	$("rec-save").addEventListener("click", () => action($("rec-save"), saveRecording));
+	confirmTap($("rec-discard"), async () => {
+		Object.assign(recording, { rows: [], pids: [], saved: true });
+	});
+	window.addEventListener("beforeunload", e => {
+		if (recording.active || hasUnsaved())
+			e.preventDefault();
+	});
 
 	// vehicle
 	const destSelect = $("obd-dest");
