@@ -1,53 +1,29 @@
 /*
- * OBD12 web app: the CLI's commands (info, power, can-stats, vin, obd, live,
- * log, ping, reset, clear-bonds) over one connection that stays open. If the
- * link drops, it reconnects to the same device without the picker, and the
- * Device restores event subscriptions and live polling.
+ * OBD12 web app: the connected vehicle, its live data (with CSV recording)
+ * and trouble codes, over one connection that stays open. If the link drops,
+ * it reconnects to the same device without the picker, and the Device
+ * restores event subscriptions and live polling.
  *
- * On every (re)connection it reads the VIN and the mode 01 PIDs the vehicle
- * supports; those PIDs become the choices in the live data section.
+ * On every (re)connection it reads the VIN, looks up the vehicle (vin.js),
+ * reads the mode 01 PIDs the vehicle supports (those become the gauges to
+ * choose from) and checks for trouble codes.
  */
 
-import {
-	BleTransport, CAN_STATES, Device, DeviceError, Err, FAULTS, InfoFlag, OBD_ID_BROADCAST, RESET_CAUSES,
-	SerialTransport, Topic, toHex,
-} from "./obd12.js";
+import { BleTransport, CAN_STATES, Device, DeviceError, Err, SerialTransport, Topic, toHex } from "./obd12.js";
 import { PIDS, decode, decodeDtcs, display, displayUnit, isRangePid, pidLabel, pidsFromBitmap } from "./pids.js";
+import { isVin, lookupVehicle } from "./vin.js";
 
 const DEFAULT_LIVE_PIDS = [0x0C, 0x0D, 0x05, 0x0F, 0x11];
 const MAX_LIVE_PIDS = 32;
 
-// live data choices until a vehicle's supported PIDs have been read
+// gauge choices until a vehicle's supported PIDs have been read
 const FALLBACK_PIDS = [0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x1F, 0x2F, 0x42, 0x46, 0x5C];
-const MIN_INTERVAL_MS = 50;
+const RATES_MS = [200, 500, 1000];
 const RECONNECT_MAX_DELAY_MS = 10000;
-const LOG_MAX_LINES = 2000;
-const MAX_RESULTS = 20;
+const MAX_CACHED_VEHICLES = 20;
 
 // time for the firmware to boot after CMD_RESET, before it answers again
 const USB_REBOOT_MS = 3000;
-
-const OBD_PRESETS = [
-	["Supported PIDs", "01 00"],
-	["RPM", "01 0C"],
-	["Fuel rail pressure", "01 23"],
-	["Fuel pressure control", "01 6D"],
-	["Stored DTCs", "03"],
-	["Pending DTCs", "07"],
-	["VIN", "09 02"],
-];
-
-const NRC_NAMES = {
-	0x10: "general reject",
-	0x11: "service not supported",
-	0x12: "sub-function not supported",
-	0x13: "incorrect message length",
-	0x21: "busy, repeat request",
-	0x22: "conditions not correct",
-	0x31: "request out of range",
-	0x33: "security access denied",
-	0x78: "response pending",
-};
 
 const $ = id => document.getElementById(id);
 
@@ -61,20 +37,6 @@ function el(tag, className, text) {
 }
 
 const hex2 = n => n.toString(16).toUpperCase().padStart(2, "0");
-const hex3 = n => "0x" + n.toString(16).toUpperCase().padStart(3, "0");
-
-// "01 0C", "01,0c" or "010C" -> [0x01, 0x0C]; null if invalid
-function parseHex(text) {
-	const bytes = [];
-	for (const token of text.trim().split(/[\s,]+/).filter(Boolean)) {
-		if (!/^[0-9a-f]+$/i.test(token))
-			return null;
-		const padded = token.length % 2 ? "0" + token : token;
-		for (let i = 0; i < padded.length; i += 2)
-			bytes.push(parseInt(padded.slice(i, i + 2), 16));
-	}
-	return bytes;
-}
 
 // --- settings, per browser ---
 
@@ -93,17 +55,17 @@ function save(key, value) {
 	} catch { }
 }
 
+const nearestRate = ms => RATES_MS.reduce((best, r) => Math.abs(r - ms) < Math.abs(best - ms) ? r : best);
+
 const settings = {
 	pids: load("pids", DEFAULT_LIVE_PIDS),
-	extra: load("extra", ""),
-	interval: load("interval", 500),
+	interval: nearestRate(load("interval", 500)),
 	imperial: load("imperial", false),
-	log: load("log", false),
-	tab: load("tab", "live"),
 	supported: load("supported", null),    // the last vehicle's supported PIDs, without 0x00, 0x20, ...
+	vehicles: load("vehicles", {}),        // VIN -> lookupVehicle() result, most recent last
 };
 
-// --- toast and log ---
+// --- toast ---
 
 let toastTimer = null;
 
@@ -119,11 +81,11 @@ function errorText(e) {
 	if (e instanceof DeviceError) {
 		switch (e.code) {
 			case Err.NOT_AUTHORIZED:
-				return "This needs a paired link. Accept the pairing prompt and enter the passkey (shown by 'obd12 info' over USB), then try again.";
-			case Err.TIMEOUT: return "No ECU answered.";
-			case Err.CAN: return "CAN bus not available. Is the ignition on?";
-			case Err.BUSY: return "The device is busy. Try again.";
-			case Err.UNAVAILABLE: return "Not available on this device.";
+				return "This needs a paired link. Accept the pairing prompt and enter the passkey (shown when connected over USB), then try again.";
+			case Err.TIMEOUT: return "The vehicle didn't answer. Is the ignition on?";
+			case Err.CAN: return "Can't reach the vehicle. Is the ignition on?";
+			case Err.BUSY: return "The adapter is busy. Try again.";
+			case Err.UNAVAILABLE: return "This adapter doesn't support that.";
 		}
 	}
 	return e?.message || String(e);
@@ -132,22 +94,7 @@ function errorText(e) {
 function toastError(e) {
 	const pairing = e instanceof DeviceError && e.code === Err.NOT_AUTHORIZED;
 	toast(errorText(e), pairing ? 9000 : 4000);
-	logLine(errorText(e), "error");
-}
-
-function logLine(text, kind = "") {
-	const log = $("log");
-	const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
-
-	const line = el("div", kind);
-	const now = new Date();
-	line.append(el("time", "", now.toTimeString().slice(0, 8) + "." + String(now.getMilliseconds()).padStart(3, "0")), text);
-	log.append(line);
-	while (log.childElementCount > LOG_MAX_LINES)
-		log.firstElementChild.remove();
-
-	if (atBottom)
-		log.scrollTop = log.scrollHeight;
+	console.warn(e);
 }
 
 // runs an async UI action, reporting errors; the button is disabled meanwhile
@@ -183,27 +130,25 @@ const connected = () => state === "connected";
 
 function setState(s) {
 	state = s;
-	const status = $("status");
-	status.dataset.state = s;
+	$("status").dataset.state = s;
 	$("status-text").textContent = {
-		disconnected: "Disconnected",
+		disconnected: "Not connected",
 		connecting: "Connecting…",
-		connected: `Connected · ${dev?.transport.kind}`,
+		connected: "Connected",
 		reconnecting: "Reconnecting…",
 	}[s];
 
-	$("connect-ble").hidden = !!dev;
-	$("connect-usb").hidden = !!dev || !SerialTransport.supported;
+	$("welcome").hidden = !!dev;
 	$("disconnect").hidden = !dev;
-	$("connect-ble").disabled = !BleTransport.supported;
-	if (!dev)
-		$("can-chip").hidden = true;
-
+	$("connect-usb").hidden = !SerialTransport.supported;
+	$("connect-ble").disabled = !BleTransport.supported || s === "connecting";
+	updateDashboard();
 	refreshControls();
 }
 
-function desiredTopics() {
-	return Topic.CAN_STATUS | ($("log-enable").checked ? Topic.LOG : 0) | ($("power-stream").checked ? Topic.POWER : 0);
+// the dashboard stays up after disconnecting while a recording is unsaved
+function updateDashboard() {
+	$("dashboard").hidden = !dev && !hasUnsaved();
 }
 
 async function connect(Transport) {
@@ -219,11 +164,12 @@ async function connect(Transport) {
 	const session = new Device(transport);
 	dev = session;
 	bindEvents(session);
+	resetVehicle();
 	setState("connecting");
 
 	try {
 		await session.open();
-		await session.setEvents(desiredTopics());
+		await session.setEvents(Topic.CAN_STATUS);
 	} catch (e) {
 		if (dev === session) {
 			dev = null;
@@ -237,24 +183,21 @@ async function connect(Transport) {
 	if (dev !== session)
 		return;
 	setState("connected");
-	logLine(`Connected over ${transport.kind}`, "app");
+	onConnected(session);
+}
+
+function onConnected(session) {
 	refreshInfo();
-	loadVehicle();
+	loadVehicle(session);
 }
 
 function bindEvents(session) {
-	session.onLog(text => logLine(text));
-	session.onCanStatus(s => {
-		showCanState(s);
-		logLine(`CAN state: ${CAN_STATES[s] ?? s}`, "can");
-	});
-	session.onPower(renderPower);
+	session.onCanStatus(showBusState);
 	session.onLiveData(onLiveData);
 	session.onLost(() => {
 		if (dev !== session)
 			return;
 		setState("reconnecting");
-		logLine("Connection lost, reconnecting", "app");
 		reconnect(session);
 	});
 }
@@ -267,9 +210,7 @@ async function reconnect(session) {
 			if (dev !== session)
 				return;
 			setState("connected");
-			logLine("Reconnected", "app");
-			refreshInfo();
-			loadVehicle();
+			onConnected(session);
 			return;
 		} catch {
 			// opened but restoring failed: start over cleanly
@@ -289,37 +230,172 @@ async function disconnect() {
 	const session = dev;
 	dev = null;
 	wakeReconnect?.();
-	setState("disconnected");
 	clearInterval(staleTimer);
 	staleTimer = null;
 	releaseWakeLock();
 	stopRecording();
 	supportedFresh = false;
 	scanFailed = false;
+	setState("disconnected");
 	updatePidStatus();
-	if (session) {
+	updateLiveHint();
+	if (session)
 		await session.close().catch(() => {});
-		logLine("Disconnected", "app");
+}
+
+// --- vehicle ---
+
+const vehicle = {
+	vin: null,
+	reading: false,         // the VIN is being read
+	readFailed: false,
+	looking: false,         // the vehicle is being looked up
+	lookupFailed: false,
+	progress: null,         // database download, 0..1
+};
+
+function resetVehicle() {
+	Object.assign(vehicle, { vin: null, reading: false, readFailed: false, looking: false, lookupFailed: false, progress: null });
+	renderVehicle();
+	$("bus").hidden = true;
+}
+
+function rememberVehicle(vin, info) {
+	const vehicles = { ...settings.vehicles };
+	delete vehicles[vin];
+	vehicles[vin] = info;
+	const vins = Object.keys(vehicles);
+	for (const old of vins.slice(0, Math.max(0, vins.length - MAX_CACHED_VEHICLES)))
+		delete vehicles[old];
+	settings.vehicles = vehicles;
+	save("vehicles", vehicles);
+}
+
+function renderVehicle() {
+	const { vin } = vehicle;
+	const info = vin ? settings.vehicles[vin] : undefined;
+
+	$("veh-year").hidden = !info?.year;
+	$("veh-year").textContent = info?.year ?? "";
+	$("veh-name").textContent = info ? `${info.make} ${info.model}`.trim()
+		: info === null ? "Unknown vehicle"
+		: "Your vehicle";
+
+	const specs = info ? [info.trim, info.body, info.engine, info.drive].filter(Boolean) : [];
+	$("veh-specs").replaceChildren(...specs.map(s => el("li", "", s)));
+	$("veh-specs").hidden = specs.length === 0;
+
+	$("vin").hidden = !vin;
+	$("vin").textContent = vin ?? "";
+	$("vin").title = vin ? "Vehicle identification number" : "";
+
+	let note = "", retry = false;
+	if (vehicle.reading)
+		note = "Reading the VIN…";
+	else if (vehicle.readFailed)
+		[note, retry] = ["Couldn't read the VIN. Turn the ignition on, then try again.", true];
+	else if (vehicle.looking)
+		note = vehicle.progress === null ? "Looking up the vehicle…" : `Downloading vehicle database, ${Math.round(vehicle.progress * 100)}%`;
+	else if (vehicle.lookupFailed)
+		[note, retry] = ["Couldn't look up this VIN. Check the internet connection, then try again.", true];
+	else if (info === null)
+		note = "This VIN isn't in the NHTSA database.";
+	$("veh-note-text").textContent = note;
+	$("veh-retry").hidden = !retry;
+	$("veh-note").hidden = !note;
+}
+
+async function readVin(session) {
+	Object.assign(vehicle, { reading: true, readFailed: false });
+	renderVehicle();
+	try {
+		const vin = (await session.getVin()).replace(/[^\x21-\x7E]/g, "").toUpperCase();
+		if (dev === session)
+			vehicle.vin = vin;
+	} catch (e) {
+		if (dev === session)
+			vehicle.readFailed = true;
+		console.warn("VIN:", errorText(e));
+	} finally {
+		vehicle.reading = false;
+		renderVehicle();
 	}
 }
 
-function showCanState(s) {
-	const chip = $("can-chip");
-	chip.hidden = false;
-	chip.textContent = "CAN " + (CAN_STATES[s] ?? s);
-	chip.className = "chip " + (s === 0 ? "ok" : s === 1 || s === 4 ? "warn" : "bad");
+async function identifyVehicle() {
+	const vin = vehicle.vin;
+	if (!vin || vin in settings.vehicles) {
+		renderVehicle();
+		return;
+	}
+	if (!isVin(vin)) {
+		rememberVehicle(vin, null);
+		renderVehicle();
+		return;
+	}
+
+	Object.assign(vehicle, { looking: true, lookupFailed: false, progress: null });
+	renderVehicle();
+	try {
+		const info = await lookupVehicle(vin, progress => {
+			if (vehicle.vin !== vin)
+				return;
+			vehicle.progress = progress;
+			renderVehicle();
+		});
+		rememberVehicle(vin, info);
+	} catch (e) {
+		if (vehicle.vin === vin)
+			vehicle.lookupFailed = true;
+		console.warn("Vehicle lookup:", e);
+	} finally {
+		if (vehicle.vin === vin) {
+			vehicle.looking = false;
+			vehicle.progress = null;
+		}
+		renderVehicle();
+	}
 }
 
-async function updateTopics() {
-	save("log", $("log-enable").checked);
-	if (connected())
-		await action(null, () => dev.setEvents(desiredTopics()));
+async function retryVehicle() {
+	if (vehicle.readFailed) {
+		await readVin(dev);
+		if (vehicle.vin)
+			identifyVehicle();
+	} else {
+		identifyVehicle();
+	}
+}
+
+async function loadVehicle(session) {
+	await readVin(session);
+	identifyVehicle();      // runs over the internet, alongside the requests below
+	if (dev === session)
+		await scanPids(session);
+	if (dev === session)
+		await checkCodes(session);
+}
+
+const BUS_STATES = [
+	["ok", "Vehicle connected"],
+	["warn", "Vehicle bus errors"],
+	["bad", "Vehicle bus errors"],
+	["bad", "Vehicle bus off"],
+	["warn", "Waiting for the vehicle. Turn the ignition on."],
+];
+
+function showBusState(s) {
+	const [kind, text] = BUS_STATES[s] ?? ["warn", `Vehicle bus state ${s}`];
+	const bus = $("bus");
+	bus.hidden = false;
+	bus.className = "bus " + kind;
+	bus.title = "CAN " + (CAN_STATES[s] ?? s);
+	$("bus-text").textContent = text;
 }
 
 // --- live data ---
 
 const liveData = new Map();     // pid -> { data, seen }
-let liveRate = [];              // arrival times of the last events
 let staleTimer = null;
 let restartTimer = null;
 let wakeLock = null;
@@ -329,26 +405,22 @@ const chipPids = () => settings.supported ?? FALLBACK_PIDS;
 
 const selectedPids = () => settings.pids.filter(p => chipPids().includes(p));
 
-function livePids() {
-	const extra = parseHex(settings.extra);
-	if (extra === null)
-		throw new Error("Other PIDs: enter hex bytes, e.g. 1C 33");
-	const pids = [...new Set([...selectedPids(), ...extra])];
-	if (pids.length > MAX_LIVE_PIDS)
-		throw new Error(`Choose at most ${MAX_LIVE_PIDS} PIDs.`);
-	return pids;
-}
-
-function liveInterval() {
-	const v = parseInt($("live-interval").value, 10);
-	return Number.isFinite(v) ? Math.max(MIN_INTERVAL_MS, v) : 500;
-}
-
 function updateLiveButton() {
 	const b = $("live-toggle");
 	b.textContent = dev?.live ? "Stop" : "Start";
-	b.classList.toggle("danger", !!dev?.live);
 	b.classList.toggle("primary", !dev?.live);
+	b.classList.toggle("ghost", !!dev?.live);
+}
+
+function updateLiveHint() {
+	const hint = $("live-hint");
+	if (dev?.live)
+		hint.textContent = "";
+	else if (selectedPids().length === 0)
+		hint.textContent = "No gauges chosen. Open Choose gauges below to add some.";
+	else
+		hint.textContent = connected() ? "Press Start to read the gauges." : "";
+	hint.hidden = !hint.textContent;
 }
 
 function renderPidChips() {
@@ -361,18 +433,25 @@ function renderPidChips() {
 		b.addEventListener("click", () => {
 			const selected = settings.pids.includes(pid);
 			if (!selected && selectedPids().length >= MAX_LIVE_PIDS) {
-				toast(`At most ${MAX_LIVE_PIDS} PIDs at a time.`);
+				toast(`Choose up to ${MAX_LIVE_PIDS} gauges.`);
 				return;
 			}
 			settings.pids = selected ? settings.pids.filter(p => p !== pid) : [...settings.pids, pid];
 			save("pids", settings.pids);
 			b.setAttribute("aria-pressed", !selected);
-			updatePidStatus();
-			liveConfigChanged();
+			gaugesChanged();
 		});
 		chips.append(b);
 	}
+	gaugesChanged();
+}
+
+function gaugesChanged() {
 	updatePidStatus();
+	updateLiveHint();
+	if (!dev?.live)
+		renderTiles(selectedPids());
+	liveConfigChanged();
 }
 
 // one tile per field of a known PID, one tile of raw bytes for any other PID
@@ -385,7 +464,8 @@ function renderTiles(pids) {
 		for (const label of labels) {
 			const tile = el("div", "tile stale");
 			tile.dataset.pid = pid;
-			tile.append(el("div", "label", label), el("div", "value", "—"));
+			const value = el("div", "value", "–");
+			tile.append(value, el("div", "label", label));
 			tiles.append(tile);
 		}
 		if (liveData.has(pid))
@@ -403,7 +483,7 @@ function renderPid(pid, data) {
 		if (!decoded) {
 			tile.hidden = i > 0;
 			value.className = "value raw";
-			value.textContent = toHex(data) || "—";
+			value.textContent = toHex(data) || "–";
 			return;
 		}
 
@@ -415,13 +495,13 @@ function renderPid(pid, data) {
 		const shown = display(field, settings.imperial);
 		value.className = "value";
 		value.textContent = shown.value.toFixed(shown.digits);
-		value.append(el("span", "unit", shown.unit));
+		if (shown.unit)
+			value.append(el("span", "unit", shown.unit));
 	});
 }
 
 function onLiveData(values) {
 	const now = performance.now();
-	liveRate = [...liveRate.filter(t => now - t < 5000), now];
 	record(values);
 
 	for (const [pid, data] of values) {
@@ -430,14 +510,11 @@ function onLiveData(values) {
 		for (const tile of $("live-tiles").querySelectorAll(`[data-pid="${pid}"]`))
 			tile.classList.remove("stale");
 	}
-
-	const rate = liveRate.length > 1 ? (liveRate.length - 1) / ((now - liveRate[0]) / 1000) : 0;
-	$("live-meta").textContent = `Updated ${new Date().toLocaleTimeString()}` + (rate ? ` · ${rate.toFixed(1)}/s` : "");
 }
 
 // dims tiles whose PID stopped answering
 function markStale() {
-	const limit = Math.max(2000, liveInterval() * 3);
+	const limit = Math.max(2000, settings.interval * 3);
 	const now = performance.now();
 	for (const tile of $("live-tiles").children) {
 		const entry = liveData.get(Number(tile.dataset.pid));
@@ -446,27 +523,27 @@ function markStale() {
 }
 
 async function startLive() {
-	const pids = livePids();
+	const pids = selectedPids();
 	if (pids.length === 0)
-		throw new Error("Choose at least one PID.");
-	await dev.liveStart(pids, liveInterval());
+		throw new Error("Choose at least one gauge.");
+	await dev.liveStart(pids, settings.interval);
 	renderTiles(pids);
 	staleTimer ??= setInterval(markStale, 1000);
 	acquireWakeLock();
+	updateLiveHint();
+}
+
+async function stopLive() {
+	clearInterval(staleTimer);
+	staleTimer = null;
+	releaseWakeLock();
+	stopRecording();
+	await dev.liveStop();
+	updateLiveHint();
 }
 
 async function toggleLive() {
-	await action($("live-toggle"), async () => {
-		if (dev.live) {
-			clearInterval(staleTimer);
-			staleTimer = null;
-			releaseWakeLock();
-			stopRecording();
-			await dev.liveStop();
-		} else {
-			await startLive();
-		}
-	});
+	await action($("live-toggle"), () => dev.live ? stopLive() : startLive());
 	updateLiveButton();
 }
 
@@ -476,7 +553,7 @@ function liveConfigChanged() {
 		return;
 	clearTimeout(restartTimer);
 	restartTimer = setTimeout(() => {
-		if (connected() && dev.live)
+		if (connected() && dev.live && selectedPids().length)
 			startLive().catch(toastError);
 	}, 500);
 }
@@ -502,6 +579,14 @@ function setUnits(imperial) {
 		renderPid(pid, entry.data);
 }
 
+function setRate(ms) {
+	settings.interval = ms;
+	save("interval", ms);
+	for (const b of $("rates").children)
+		b.setAttribute("aria-pressed", Number(b.dataset.ms) === ms);
+	liveConfigChanged();
+}
+
 // --- recording ---
 //
 // Every EVT_LIVE_DATA becomes one row, so rows come at the live interval (or
@@ -521,7 +606,6 @@ function record(values) {
 	for (const pid of values.keys())
 		if (!recording.pids.includes(pid))
 			recording.pids.push(pid);
-	updateRecordingUi();
 }
 
 async function startRecording() {
@@ -532,13 +616,8 @@ async function startRecording() {
 	if (!dev?.live)
 		return;
 
-	let pids = [];
-	try {
-		pids = livePids();
-	} catch { }
-	Object.assign(recording, { active: true, start: Date.now(), pids, rows: [], saved: false });
+	Object.assign(recording, { active: true, start: Date.now(), pids: selectedPids(), rows: [], saved: false });
 	recTimer = setInterval(updateRecordingUi, 1000);
-	logLine("Recording started", "app");
 	updateRecordingUi();
 }
 
@@ -548,7 +627,6 @@ function stopRecording() {
 	recording.active = false;
 	clearInterval(recTimer);
 	recTimer = null;
-	logLine(`Recording stopped, ${recording.rows.length} samples`, "app");
 	updateRecordingUi();
 }
 
@@ -561,7 +639,7 @@ function onRecordClick() {
 	}
 	if (hasUnsaved() && !b.classList.contains("armed")) {
 		b.classList.add("armed");
-		b.textContent = b.dataset.confirm;
+		b.querySelector(".rec-label").textContent = b.dataset.confirm;
 		recArmTimer = setTimeout(() => {
 			b.classList.remove("armed");
 			updateRecordingUi();
@@ -583,18 +661,21 @@ function updateRecordingUi() {
 	const b = $("rec-toggle");
 	const n = recording.rows.length;
 	if (!b.classList.contains("armed"))
-		b.textContent = recording.active ? "Stop" : "Record";
+		b.querySelector(".rec-label").textContent = recording.active ? "Stop recording" : "Record";
+	b.classList.toggle("active", recording.active);
 	b.disabled = !recording.active && !connected();
-	$("rec-save").disabled = recording.active || n === 0;
-	$("rec-discard").disabled = recording.active || n === 0;
-	$("rec-dot").hidden = !recording.active;
 
 	const end = recording.active ? Date.now() : recording.rows.at(-1)?.t ?? recording.start;
-	const summary = `${n.toLocaleString()} samples · ${formatDuration((end - recording.start) / 1000)}`;
+	const duration = formatDuration((end - recording.start) / 1000);
+	const samples = `${n.toLocaleString()} ${n === 1 ? "sample" : "samples"}`;
+	$("recording").hidden = !recording.active && n === 0;
+	$("recording").classList.toggle("active", recording.active);
 	$("rec-status").textContent = recording.active
-		? `Recording · ${summary}`
-		: n ? `${summary} · ${recording.saved ? "saved" : "not saved"}`
-		: "Records each live update as a CSV row, at the interval set above.";
+		? `Recording ${duration}, ${samples}`
+		: `${duration} recorded, ${samples}${recording.saved ? ", saved" : ""}`;
+	$("rec-save").hidden = recording.active;
+	$("rec-discard").hidden = recording.active;
+	updateDashboard();
 }
 
 // a column per field that occurs in the recording; PIDs without fields (or
@@ -650,7 +731,7 @@ function recordingCsv() {
 	}
 
 	// the BOM makes Excel read the file (and the ° in units) as UTF-8
-	return "\uFEFF" + lines.join("\r\n") + "\r\n";
+	return "﻿" + lines.join("\r\n") + "\r\n";
 }
 
 function fileStamp(date) {
@@ -688,100 +769,13 @@ async function saveRecording() {
 	updateRecordingUi();
 }
 
-// --- vehicle ---
-
-// a short human reading of a positive response, if there is one
-function describeResponse(msg) {
-	if (msg[0] === 0x41 && msg.length >= 2) {
-		const pid = msg[1];
-		if (pid % 0x20 === 0 && msg.length >= 6) {
-			const supported = [];
-			for (let i = 0; i < 32; i++)
-				if (msg[2 + (i >> 3)] & (0x80 >> (i & 7)))
-					supported.push(hex2(pid + i + 1));
-			return supported.length ? `Supported PIDs: ${supported.join(" ")}` : "No PIDs supported in this range";
-		}
-		const decoded = decode(pid, msg.slice(2));
-		if (decoded) {
-			return decoded.map(f => {
-				const shown = display(f, settings.imperial);
-				return `${f.label}: ${shown.value.toFixed(shown.digits)} ${shown.unit}`.trim();
-			}).join(" · ");
-		}
-	}
-	if (msg[0] === 0x43 || msg[0] === 0x47 || msg[0] === 0x4A) {
-		const codes = decodeDtcs(msg);
-		return codes.length ? codes.join("  ") : "No trouble codes";
-	}
-	if (msg[0] === 0x49 && msg.length > 3) {
-		const text = String.fromCharCode(...msg.slice(3));
-		if (/^[\x20-\x7E]+$/.test(text))
-			return text.trim();
-	}
-	return null;
-}
-
-async function sendObd() {
-	const bytes = parseHex($("obd-request").value);
-	if (!bytes || bytes.length < 1 || bytes.length > 7) {
-		toast("Enter 1 to 7 hex bytes, e.g. 01 0C");
-		return;
-	}
-	const dest = parseInt($("obd-dest").value, 16);
-
-	const card = el("div", "result");
-	const head = el("div", "result-head");
-	head.append(el("span", "req", toHex(bytes)), el("span", "", `${dest === OBD_ID_BROADCAST ? "broadcast" : hex3(dest)} · ${new Date().toLocaleTimeString()}`));
-	const body = el("div", "meta", "Waiting…");
-	card.append(head, body);
-	const results = $("obd-results");
-	results.prepend(card);
-	while (results.childElementCount > MAX_RESULTS)
-		results.lastElementChild.remove();
-
-	await action($("obd-send"), async () => {
-		try {
-			const responses = await dev.obdRequest(bytes, dest);
-			body.remove();
-			for (const r of responses) {
-				const ecu = el("div", r.negative ? "ecu negative" : "ecu");
-				ecu.append(el("div", "id", `ECU ${hex3(r.ecuId)}`), el("div", "bytes", toHex(r.message)));
-				const text = r.negative
-					? `Negative response, NRC 0x${hex2(r.nrc)}` + (NRC_NAMES[r.nrc] ? ` (${NRC_NAMES[r.nrc]})` : "")
-					: describeResponse(r.message);
-				if (text)
-					ecu.append(el("div", "decoded", text));
-				card.append(ecu);
-			}
-		} catch (e) {
-			body.className = "error";
-			body.textContent = errorText(e);
-			throw e;
-		}
-	});
-}
-
-// --- vehicle discovery ---
+// --- supported PIDs ---
 
 let supportedFresh = false;     // settings.supported was read from the connected vehicle
 let scanning = false;
 let scanFailed = false;
 
-async function loadVehicle() {
-	const session = dev;
-	try {
-		const vin = await session.getVin();
-		if (dev === session)
-			$("vin").textContent = vin;
-	} catch (e) {
-		logLine(`VIN: ${errorText(e)}`, "error");
-	}
-	if (dev === session)
-		await scanPids(false);
-}
-
-async function scanPids(fromButton) {
-	const session = dev;
+async function scanPids(session) {
 	scanning = true;
 	updatePidStatus();
 	try {
@@ -792,15 +786,10 @@ async function scanPids(fromButton) {
 		save("supported", supported);
 		supportedFresh = true;
 		scanFailed = false;
-		logLine(`Vehicle supports ${supported.length} PIDs: ${supported.map(hex2).join(" ")}`, "app");
-		renderPidChips();
-		liveConfigChanged();    // stops polling PIDs this vehicle does not have
+		renderPidChips();       // also stops polling PIDs this vehicle does not have
 	} catch (e) {
 		scanFailed = true;
-		if (fromButton)
-			toastError(e);
-		else
-			logLine(`Supported PIDs: ${errorText(e)}`, "error");
+		console.warn("Supported PIDs:", errorText(e));
 	} finally {
 		scanning = false;
 		updatePidStatus();
@@ -808,20 +797,72 @@ async function scanPids(fromButton) {
 }
 
 function updatePidStatus() {
-	const selected = `${selectedPids().length} selected`;
+	const count = selectedPids().length;
+	$("gauge-count").textContent = `${count} of ${chipPids().length}`;
+
 	let text;
 	if (scanning)
-		text = "Reading the PIDs this vehicle supports…";
+		text = "Checking which gauges this vehicle supports…";
+	else if (scanFailed)
+		text = "The vehicle didn't say which gauges it supports. Turn the ignition on and scan again.";
 	else if (settings.supported)
-		text = `${settings.supported.length} PIDs supported${supportedFresh ? "" : " (last vehicle)"} · ${selected}`;
+		text = supportedFresh ? "Gauges this vehicle supports." : "Gauges supported by the last vehicle.";
 	else
-		text = `Common PIDs · ${selected}`;
-	if (scanFailed && !scanning)
-		text += " · no answer, turn the ignition on and scan again";
+		text = "Common gauges. Connect to see the ones this vehicle supports.";
 	$("pid-status").textContent = text;
+	$("pid-scan").hidden = !scanFailed || scanning;
 }
 
-// --- device ---
+// --- trouble codes ---
+
+async function readCodes(session) {
+	const codes = [];
+	for (const [service, kind] of [[0x03, "stored"], [0x07, "pending"]]) {
+		let responses;
+		try {
+			responses = await session.obdRequest(Uint8Array.of(service));
+		} catch (e) {
+			// some vehicles don't answer for pending codes
+			if (service !== 0x03 && e instanceof DeviceError && e.code === Err.TIMEOUT)
+				continue;
+			throw e;
+		}
+		for (const r of responses)
+			if (!r.negative && r.message[0] === service + 0x40)
+				for (const code of decodeDtcs(r.message))
+					if (!codes.some(c => c.code === code))
+						codes.push({ code, kind });
+	}
+	return codes;
+}
+
+function renderCodes(codes) {
+	const body = $("codes-body");
+	if (codes.length === 0) {
+		body.replaceChildren(el("p", "all-clear", "No stored or pending trouble codes."));
+		return;
+	}
+	const list = el("ul", "dtcs");
+	for (const { code, kind } of codes) {
+		const item = el("li");
+		item.append(el("span", "dtc", code), el("span", "dtc-kind", kind === "stored" ? "Stored" : "Pending"));
+		list.append(item);
+	}
+	body.replaceChildren(list);
+}
+
+async function checkCodes(session) {
+	$("codes-body").replaceChildren(el("p", "meta", "Checking…"));
+	try {
+		const codes = await readCodes(session);
+		if (dev === session)
+			renderCodes(codes);
+	} catch (e) {
+		$("codes-body").replaceChildren(el("p", "meta", `Couldn't check for codes. ${errorText(e)}`));
+	}
+}
+
+// --- adapter ---
 
 function renderKv(dl, rows) {
 	dl.replaceChildren();
@@ -830,33 +871,25 @@ function renderKv(dl, rows) {
 }
 
 async function refreshInfo() {
-	await action($("info-refresh"), async () => {
-		const info = await dev.getInfo();
-		const flags = Object.keys(InfoFlag).filter(k => info.flags & InfoFlag[k]).map(k => k.toLowerCase().replace("_", " "));
+	const session = dev;
+	try {
+		const info = await session.getInfo();
+		if (dev !== session)
+			return;
+		const firmware = info.fwVersion.join(".");
 		const rows = [
-			["Protocol", String(info.protoVersion)],
-			["Firmware", info.fwVersion.join(".")],
-			["HW config", "0b" + info.hwconf.toString(2).padStart(2, "0")],
-			["Reset cause", RESET_CAUSES[info.resetCause] ?? String(info.resetCause)],
-			["Last fault", (FAULTS[info.lastFault] ?? String(info.lastFault)) + (info.lastFaultInfo ? ` (0x${info.lastFaultInfo.toString(16).toUpperCase().padStart(8, "0")})` : "")],
-			["CAN state", CAN_STATES[info.canState] ?? String(info.canState)],
+			["Connection", session.transport.kind === "USB" ? "USB" : "Bluetooth"],
+			["Firmware", firmware],
+			["Bluetooth address", info.bleMac],
 		];
-		if (info.uid.some(Boolean))
-			rows.push(["UID", info.uid.map(w => w.toString(16).toUpperCase().padStart(8, "0")).join("")]);
-		rows.push(["BLE address", info.bleMac]);
 		if (info.blePasskey)
-			rows.push(["BLE passkey", String(info.blePasskey).padStart(6, "0")]);
-		rows.push(["Flags", flags.join(", ") || "–"]);
+			rows.push(["Pairing passkey", String(info.blePasskey).padStart(6, "0")]);
 		renderKv($("info"), rows);
-		showCanState(info.canState);
-	});
-}
-
-function renderPower(p) {
-	renderKv($("power"), [
-		["USB regulator", `${p.usbRegulatorOk ? "ok" : "off"} · ${p.usbRegulatorMv} mV`],
-		["CAN regulator", `${p.canRegulatorOk ? "ok" : "off"} · ${p.canRegulatorMv} mV`],
-	]);
+		$("adapter-summary").textContent = `Firmware ${firmware}`;
+		showBusState(info.canState);
+	} catch (e) {
+		console.warn("Device info:", errorText(e));
+	}
 }
 
 // first tap arms the button, a second tap within 3 s runs it
@@ -882,51 +915,32 @@ function confirmTap(button, fn) {
 
 // --- setup ---
 
-function selectTab(name) {
-	if (!$("tab-" + name))
-		name = "live";
-	for (const b of document.querySelectorAll(".tabs button"))
-		b.setAttribute("aria-selected", b.dataset.tab === name);
-	for (const p of document.querySelectorAll(".panel"))
-		p.hidden = p.id !== "tab-" + name;
-	save("tab", name);
-}
-
 function init() {
 	$("unsupported").hidden = BleTransport.supported;
 	$("connect-ble").addEventListener("click", () => connect(BleTransport));
 	$("connect-usb").addEventListener("click", () => connect(SerialTransport));
 	$("disconnect").addEventListener("click", disconnect);
 
-	for (const b of document.querySelectorAll(".tabs button"))
-		b.addEventListener("click", () => selectTab(b.dataset.tab));
-	selectTab(settings.tab);
+	// vehicle
+	$("veh-retry").addEventListener("click", () => action($("veh-retry"), retryVehicle));
+	$("codes-check").addEventListener("click", () => action($("codes-check"), () => checkCodes(dev)));
 
 	// live
-	renderPidChips();
-	$("live-extra").value = settings.extra;
-	$("live-interval").value = settings.interval;
-	$("live-extra").addEventListener("change", e => {
-		settings.extra = e.target.value;
-		save("extra", settings.extra);
-		liveConfigChanged();
-	});
-	$("live-interval").addEventListener("change", () => {
-		settings.interval = liveInterval();
-		$("live-interval").value = settings.interval;
-		save("interval", settings.interval);
-		liveConfigChanged();
-	});
-	$("live-toggle").addEventListener("click", toggleLive);
-	$("pid-scan").addEventListener("click", () => action($("pid-scan"), () => scanPids(true)));
+	for (const ms of RATES_MS) {
+		const b = el("button", "", `${ms / 1000} s`);
+		b.dataset.ms = ms;
+		b.addEventListener("click", () => setRate(ms));
+		$("rates").append(b);
+	}
+	setRate(settings.interval);
 	for (const b of $("units").children)
 		b.addEventListener("click", () => setUnits(b.dataset.units === "imperial"));
 	setUnits(settings.imperial);
-	try {
-		renderTiles(livePids());
-	} catch {
-		renderTiles(settings.pids);
-	}
+	renderPidChips();
+	$("live-toggle").addEventListener("click", toggleLive);
+	$("pid-scan").addEventListener("click", () => action($("pid-scan"), () => scanPids(dev)));
+
+	// recording
 	$("rec-toggle").addEventListener("click", onRecordClick);
 	$("rec-save").addEventListener("click", () => action($("rec-save"), saveRecording));
 	confirmTap($("rec-discard"), async () => {
@@ -937,46 +951,11 @@ function init() {
 			e.preventDefault();
 	});
 
-	// vehicle
-	const destSelect = $("obd-dest");
-	destSelect.append(new Option("7DF (all)", "7DF"));
-	for (let id = 0x7E0; id <= 0x7E7; id++)
-		destSelect.append(new Option(id.toString(16).toUpperCase(), id.toString(16)));
-	for (const [label, request] of OBD_PRESETS) {
-		const b = el("button", "needs-link", label);
-		b.disabled = true;
-		b.addEventListener("click", () => {
-			$("obd-request").value = request;
-			sendObd();
-		});
-		$("obd-presets").append(b);
-	}
-	$("obd-send").addEventListener("click", sendObd);
-	$("obd-request").addEventListener("keydown", e => {
-		if (e.key === "Enter" && connected())
-			sendObd();
-	});
-	$("vin-read").addEventListener("click", () => action($("vin-read"), async () => {
-		$("vin").textContent = await dev.getVin();
-	}));
-
-	// device
-	$("info-refresh").addEventListener("click", refreshInfo);
-	$("power-refresh").addEventListener("click", () => action($("power-refresh"), async () => renderPower(await dev.getPower())));
-	$("power-stream").addEventListener("change", updateTopics);
-	$("can-refresh").addEventListener("click", () => action($("can-refresh"), async () => {
-		const stats = await dev.getCanStats();
-		renderKv($("can-stats"), Object.entries(stats).map(([k, v]) => [k.replaceAll("_", " "), v.toLocaleString()]));
-	}));
-	$("ping").addEventListener("click", () => action($("ping"), async () => {
-		const start = performance.now();
-		await dev.ping(new TextEncoder().encode("obd12"));
-		$("ping-result").textContent = `Pong in ${(performance.now() - start).toFixed(1)} ms`;
-	}));
+	// adapter
 	confirmTap($("reset"), async () => {
 		const session = dev;
 		await session.reset();
-		toast("The device is rebooting.");
+		toast("The adapter is restarting.");
 
 		// a BLE link drops and reconnects by itself; the USB serial port stays open
 		if (session.transport.kind === "USB") {
@@ -988,13 +967,8 @@ function init() {
 	});
 	confirmTap($("clear-bonds"), async () => {
 		await dev.bleClearBonds();
-		toast("BLE bonds cleared.");
+		toast("Forgot all paired phones.");
 	});
-
-	// log
-	$("log-enable").checked = settings.log;
-	$("log-enable").addEventListener("change", updateTopics);
-	$("log-clear").addEventListener("click", () => $("log").replaceChildren());
 
 	document.addEventListener("visibilitychange", () => {
 		if (document.hidden)

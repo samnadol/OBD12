@@ -47,7 +47,7 @@ Commands: `info`, `power`, `can-stats`, `vin`, `pids`, `obd`, `live`, `log`, `pi
 
 The firmware reads the VIN and the vehicle's supported mode 01 PIDs at startup. `pids` lists them, and `live --pids supported` polls all of them (up to 32). The web app reads both when it connects and offers every supported PID in its live data section.
 
-`software/web/` is a browser version of the CLI using Web Bluetooth (Bluefy on iOS, Chrome or Edge elsewhere) or Web Serial for USB (desktop Chrome or Edge). It keeps one connection open and reconnects on its own. It has no build step, but it must be served over HTTPS or from `localhost`:
+`software/web/` is a browser app using Web Bluetooth (Bluefy on iOS, Chrome or Edge elsewhere) or Web Serial for USB (desktop Chrome or Edge). It shows the vehicle's make and model (decoded from the VIN with [corgi](https://github.com/cardog-ai/corgi), which downloads a 25 MB copy of the NHTSA vPIC database the first time it sees a new VIN), live gauges with CSV recording, and trouble codes. Diagnostics such as power, CAN statistics and the device log stay in the CLI. It keeps one connection open and reconnects on its own. It has no build step, but it must be served over HTTPS or from `localhost`:
 
 ```
 cd software/web

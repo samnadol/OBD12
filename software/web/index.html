@@ -4,7 +4,12 @@
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 	<meta name="color-scheme" content="light dark">
+	<meta name="theme-color" content="#eef1f4" media="(prefers-color-scheme: light)">
+	<meta name="theme-color" content="#121820" media="(prefers-color-scheme: dark)">
 	<title>OBD12</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap">
 	<link rel="stylesheet" href="style.css">
 	<script type="module" src="app.js"></script>
 </head>
@@ -12,147 +17,111 @@
 	<header class="topbar">
 		<div class="brand">OBD12</div>
 		<div class="status" id="status" data-state="disconnected">
-			<span class="dot"></span><span id="status-text">Disconnected</span>
+			<span class="dot"></span><span id="status-text">Not connected</span>
 		</div>
-		<span class="chip" id="can-chip" hidden></span>
-		<div class="conn">
-			<button id="connect-ble" class="primary">Connect</button>
-			<button id="connect-usb" hidden>USB</button>
-			<button id="disconnect" hidden>Disconnect</button>
-		</div>
+		<button id="disconnect" class="ghost" hidden>Disconnect</button>
 	</header>
 
-	<p class="notice" id="unsupported" hidden>
-		This browser can't use Bluetooth. On iPhone, open this page in Bluefy. On a computer, use Chrome or Edge.
-	</p>
-
-	<nav class="tabs" role="tablist">
-		<button role="tab" data-tab="live" aria-selected="true">Live</button>
-		<button role="tab" data-tab="vehicle">Vehicle</button>
-		<button role="tab" data-tab="device">Device</button>
-		<button role="tab" data-tab="log">Log</button>
-	</nav>
-
 	<main>
-		<section class="panel" id="tab-live">
-			<div class="card">
-				<div class="card-head">
+		<section class="welcome" id="welcome">
+			<svg class="port" viewBox="0 0 64 40" aria-hidden="true">
+				<path d="M4 4h56l-6 32H10z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
+				<g fill="currentColor">
+					<circle cx="14" cy="14" r="2.2"/><circle cx="19" cy="14" r="2.2"/><circle cx="24" cy="14" r="2.2"/><circle cx="29" cy="14" r="2.2"/>
+					<circle cx="35" cy="14" r="2.2"/><circle cx="40" cy="14" r="2.2"/><circle cx="45" cy="14" r="2.2"/><circle cx="50" cy="14" r="2.2"/>
+					<circle cx="16" cy="25" r="2.2"/><circle cx="21" cy="25" r="2.2"/><circle cx="26" cy="25" r="2.2"/><circle cx="31" cy="25" r="2.2"/>
+					<circle cx="36" cy="25" r="2.2"/><circle cx="41" cy="25" r="2.2"/><circle cx="46" cy="25" r="2.2"/><circle cx="51" cy="25" r="2.2"/>
+				</g>
+			</svg>
+			<h1>Connect your adapter</h1>
+			<p>Plug OBD12 into the diagnostic port under the dashboard and turn the ignition on.</p>
+			<div class="welcome-actions">
+				<button id="connect-ble" class="primary big">Connect with Bluetooth</button>
+				<button id="connect-usb" class="ghost" hidden>Connect with USB</button>
+			</div>
+			<p class="notice" id="unsupported" hidden>
+				This browser can't use Bluetooth. On iPhone, open this page in Bluefy. On a computer, use Chrome or Edge.
+			</p>
+		</section>
+
+		<div id="dashboard" hidden>
+			<section class="vehicle" id="vehicle" aria-live="polite">
+				<p class="year" id="veh-year" hidden></p>
+				<h1 id="veh-name">Your vehicle</h1>
+				<ul class="specs" id="veh-specs" hidden></ul>
+				<p class="plate" id="vin" hidden></p>
+				<p class="note" id="veh-note">
+					<span id="veh-note-text"></span>
+					<button id="veh-retry" class="link needs-link" hidden>Try again</button>
+				</p>
+				<p class="bus" id="bus" hidden><span class="dot"></span><span id="bus-text"></span></p>
+			</section>
+
+			<section class="section" id="live">
+				<div class="section-head">
 					<h2>Live data</h2>
-					<div class="segmented" id="units">
-						<button data-units="metric">Metric</button>
-						<button data-units="imperial">Imperial</button>
+					<div class="head-actions">
+						<button id="rec-toggle" class="rec" data-confirm="Replace recording?" disabled><span class="rec-dot"></span><span class="rec-label">Record</span></button>
+						<button id="live-toggle" class="primary needs-link" disabled>Start</button>
 					</div>
 				</div>
-				<div class="card-head">
-					<p class="meta" id="pid-status"></p>
-					<button id="pid-scan" class="needs-link" disabled>Scan</button>
-				</div>
-				<div class="chips" id="pid-chips"></div>
-				<div class="fields">
-					<label>Other PIDs
-						<input id="live-extra" placeholder="hex, e.g. 1C 33" autocomplete="off" autocapitalize="characters" spellcheck="false">
-					</label>
-					<label class="narrow">Interval (ms)
-						<input id="live-interval" type="number" inputmode="numeric" min="50" step="50" value="500">
-					</label>
-				</div>
-				<button id="live-toggle" class="primary wide needs-link" disabled>Start</button>
-			</div>
-			<div class="tiles" id="live-tiles"></div>
-			<p class="meta" id="live-meta"></p>
 
-			<div class="card">
-				<div class="card-head">
-					<h2>Recording</h2>
-					<span class="rec-dot" id="rec-dot" hidden></span>
+				<div class="recording" id="recording" hidden>
+					<p id="rec-status"></p>
+					<div class="rec-actions">
+						<button id="rec-save" class="ghost">Save CSV</button>
+						<button id="rec-discard" class="ghost danger" data-confirm="Tap again to discard">Discard</button>
+					</div>
 				</div>
-				<p class="meta" id="rec-status"></p>
-				<div class="actions">
-					<button id="rec-toggle" class="primary" data-confirm="Tap again to discard unsaved" disabled>Record</button>
-					<button id="rec-save" disabled>Save CSV</button>
-					<button id="rec-discard" class="danger" data-confirm="Tap again to discard" disabled>Discard</button>
-				</div>
-			</div>
-		</section>
 
-		<section class="panel" id="tab-vehicle" hidden>
-			<div class="card">
-				<div class="card-head">
-					<h2>VIN</h2>
-					<button id="vin-read" class="needs-link" disabled>Read</button>
-				</div>
-				<output class="vin mono" id="vin">—</output>
-			</div>
+				<div class="tiles" id="live-tiles"></div>
+				<p class="hint" id="live-hint"></p>
 
-			<div class="card">
-				<h2>OBD request</h2>
-				<div class="chips" id="obd-presets"></div>
-				<div class="fields">
-					<label>Request bytes
-						<input id="obd-request" placeholder="hex, e.g. 01 0C" autocomplete="off" autocapitalize="characters" spellcheck="false">
-					</label>
-					<label class="narrow">Destination
-						<select id="obd-dest"></select>
-					</label>
-				</div>
-				<button id="obd-send" class="primary wide needs-link" disabled>Send</button>
-			</div>
-			<div id="obd-results"></div>
-		</section>
+				<details class="panel" id="gauges">
+					<summary><span>Choose gauges</span><span class="summary-meta" id="gauge-count"></span></summary>
+					<div class="panel-body">
+						<p class="meta" id="pid-status"></p>
+						<button id="pid-scan" class="link needs-link" hidden>Scan again</button>
+						<div class="chips" id="pid-chips"></div>
+						<div class="settings">
+							<div class="setting">
+								<span>Units</span>
+								<div class="segmented" id="units">
+									<button data-units="metric">Metric</button>
+									<button data-units="imperial">Imperial</button>
+								</div>
+							</div>
+							<div class="setting">
+								<span>Update every</span>
+								<div class="segmented" id="rates"></div>
+							</div>
+						</div>
+					</div>
+				</details>
+			</section>
 
-		<section class="panel" id="tab-device" hidden>
-			<div class="card">
-				<div class="card-head">
-					<h2>Device information</h2>
-					<button id="info-refresh" class="needs-link" disabled>Refresh</button>
+			<section class="section" id="codes">
+				<div class="section-head">
+					<h2>Trouble codes</h2>
+					<button id="codes-check" class="ghost needs-link" disabled>Check again</button>
 				</div>
-				<dl class="kv" id="info"></dl>
-			</div>
+				<div id="codes-body"><p class="meta">Not checked yet.</p></div>
+			</section>
 
-			<div class="card">
-				<div class="card-head">
-					<h2>Power</h2>
-					<button id="power-refresh" class="needs-link" disabled>Refresh</button>
+			<details class="panel" id="adapter">
+				<summary><span>Adapter</span><span class="summary-meta" id="adapter-summary"></span></summary>
+				<div class="panel-body">
+					<dl class="kv" id="info"></dl>
+					<p class="meta">Restarting the adapter and forgetting phones need a paired Bluetooth link. The first try asks to pair: enter the passkey shown when connected over USB, then try again.</p>
+					<div class="actions">
+						<button id="reset" class="ghost danger needs-link" data-confirm="Tap again to restart" disabled>Restart adapter</button>
+						<button id="clear-bonds" class="ghost danger needs-link" data-confirm="Tap again to forget all" disabled>Forget paired phones</button>
+					</div>
 				</div>
-				<label class="switch"><input type="checkbox" id="power-stream"> Update every second</label>
-				<dl class="kv" id="power"></dl>
-			</div>
+			</details>
 
-			<div class="card">
-				<div class="card-head">
-					<h2>CAN statistics</h2>
-					<button id="can-refresh" class="needs-link" disabled>Refresh</button>
-				</div>
-				<dl class="kv" id="can-stats"></dl>
-			</div>
-
-			<div class="card">
-				<div class="card-head">
-					<h2>Ping</h2>
-					<button id="ping" class="needs-link" disabled>Ping</button>
-				</div>
-				<output class="meta" id="ping-result"></output>
-			</div>
-
-			<div class="card">
-				<h2>Maintenance</h2>
-				<p class="meta">Over BLE these need a paired link. The first attempt asks the phone to pair; enter the passkey shown by <code>obd12 info</code> over USB, then try again.</p>
-				<div class="actions">
-					<button id="reset" class="danger needs-link" data-confirm="Tap again to reboot" disabled>Reboot device</button>
-					<button id="clear-bonds" class="danger needs-link" data-confirm="Tap again to forget all" disabled>Forget BLE bonds</button>
-				</div>
-			</div>
-		</section>
-
-		<section class="panel" id="tab-log" hidden>
-			<div class="card log-card">
-				<div class="card-head">
-					<label class="switch"><input type="checkbox" id="log-enable"> Device log</label>
-					<button id="log-clear">Clear</button>
-				</div>
-				<div class="log mono" id="log" role="log"></div>
-			</div>
-		</section>
+			<p class="credit">Vehicle details from the NHTSA vPIC database, decoded with <a href="https://github.com/cardog-ai/corgi">corgi</a>.</p>
+		</div>
 	</main>
 
 	<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
