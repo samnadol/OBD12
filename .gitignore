@@ -1,1 +1,7 @@
 pcb/pcb-backups/
+
+# macOS Finder metadata
+.DS_Store
+
+# local research notes and reports (not published)
+research/
