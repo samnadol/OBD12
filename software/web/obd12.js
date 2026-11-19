@@ -25,7 +25,7 @@ export const Cmd = Object.freeze({
 	GET_CAN_STATS: 0x05,
 	RESET: 0x06,
 	BLE_CLEAR_BONDS: 0x07,
-	OBD_REQUEST: 0x10,
+	DIAG_REQUEST: 0x10,
 	GET_VIN: 0x11,
 	LIVE_START: 0x12,
 	LIVE_STOP: 0x13,
@@ -44,6 +44,7 @@ export const Err = Object.freeze({
 	NOT_AUTHORIZED: 0x05,
 	CAN: 0x06,
 	UNAVAILABLE: 0x07,
+	NOT_PERMITTED: 0x08,    // diagnostic service or CAN ID the device never sends
 });
 
 export const InfoFlag = Object.freeze({ BLE_AVAILABLE: 0x01, BLE_CONNECTED: 0x02, AUTHORIZED: 0x04, VIN_KNOWN: 0x08, PIDS_KNOWN: 0x10 });
@@ -55,10 +56,18 @@ export const CAN_STATES = ["OK", "error warning", "error passive", "bus-off", "n
 // CAN IDs are u32; bit 31 marks a 29-bit ID (as in Linux SocketCAN)
 export const CAN_ID_EXT = 0x80000000;
 
-// the vehicle's OBD broadcast: the device sends it on 0x7DF or 0x18DB33F1,
+export const DiagFlag = Object.freeze({
+	AUTO: 0x01,             // the vehicle's OBD broadcast (0x7DF or 0x18DB33F1); IDs must be 0
+	FUNCTIONAL: 0x02,       // several ECUs may answer: collect them until the timeout
+	EXT_ADDR: 0x04,         // extended addressing: txExt / rxExt before the PCI in every frame
+});
+
+// where a DIAG_REQUEST goes: { flags, txId, rxId, rxMask (0 = all ID bits), txExt, rxExt, pad, timeoutMs (0 = 50) }.
+// OBD_BROADCAST is the vehicle's OBD broadcast: the device sends it on 0x7DF or 0x18DB33F1,
 // whichever addressing the vehicle uses (info.obdAddressing: 0 unknown, 1 11-bit, 2 29-bit)
-export const OBD_ID_BROADCAST = 0x7DF;
+export const OBD_BROADCAST = Object.freeze({ flags: DiagFlag.AUTO });
 export const OBD_NEGATIVE_RESPONSE = 0x7F;
+const DIAG_TARGET_LEN = 18;
 
 const DEFAULT_TIMEOUT_MS = 2000;
 const OBD_TIMEOUT_MS = 7000;            // allows for "response pending" (up to 5 s)
@@ -240,17 +249,32 @@ export function parseCanStats(p) {
 	return Object.fromEntries(CAN_STATS_FIELDS.map((name, i) => [name, v.getUint32(i * 4, true)]));
 }
 
+export function packDiagRequest(target, data) {
+	const p = new Uint8Array(DIAG_TARGET_LEN + data.length);
+	const v = view(p);
+	p[0] = target.flags ?? 0;
+	v.setUint32(1, target.txId ?? 0, true);
+	v.setUint32(5, target.rxId ?? 0, true);
+	v.setUint32(9, target.rxMask ?? 0, true);
+	p[13] = target.txExt ?? 0;
+	p[14] = target.rxExt ?? 0;
+	p[15] = target.pad ?? 0;
+	v.setUint16(16, target.timeoutMs ?? 0, true);
+	p.set(data, DIAG_TARGET_LEN);
+	return p;
+}
+
 // one record per answering ECU: { ecuId, message, negative, nrc }; ecuId has CAN_ID_EXT set for 29-bit
-export function parseObdRecords(p) {
+export function parseDiagRecords(p) {
 	const v = view(p);
 	const responses = [];
 	let pos = 0;
-	while (pos + 5 <= p.length) {
-		const len = p[pos + 4];
-		const message = p.slice(pos + 5, pos + 5 + len);
+	while (pos + 6 <= p.length) {
+		const len = v.getUint16(pos + 4, true);
+		const message = p.slice(pos + 6, pos + 6 + len);
 		const negative = message.length >= 3 && message[0] === OBD_NEGATIVE_RESPONSE;
 		responses.push({ ecuId: v.getUint32(pos, true), message, negative, nrc: negative ? message[2] : null });
-		pos += 5 + len;
+		pos += 6 + len;
 	}
 	return responses;
 }
@@ -423,12 +447,10 @@ export class Device {
 		await this.request(Cmd.BLE_CLEAR_BONDS);
 	}
 
-	// raw OBD request (service ID + parameters, 1-7 bytes); resolves with every ECU's answer
-	async obdRequest(data, dest = OBD_ID_BROADCAST, timeoutMs = OBD_TIMEOUT_MS) {
-		const payload = new Uint8Array(4 + data.length);
-		view(payload).setUint32(0, dest, true);
-		payload.set(data, 4);
-		return parseObdRecords(await this.request(Cmd.OBD_REQUEST, payload, timeoutMs));
+	// diagnostic request (service ID + parameters, 1-7 bytes, 1-6 with extended addressing) sent as
+	// one ISO-TP single frame; resolves with every answer that belongs to it
+	async diagRequest(data, target = OBD_BROADCAST, timeoutMs = OBD_TIMEOUT_MS) {
+		return parseDiagRecords(await this.request(Cmd.DIAG_REQUEST, packDiagRequest(target, data), timeoutMs));
 	}
 
 	async getVin() {
@@ -437,32 +459,7 @@ export class Device {
 
 	// supported mode 01 PIDs, 32-byte bitmap: PID p is bit 0x80 >> ((p-1) % 8) of byte (p-1) / 8
 	async getSupportedPidsBitmap() {
-		try {
-			return await this.request(Cmd.GET_SUPPORTED_PIDS, undefined, OBD_TIMEOUT_MS);
-		} catch (e) {
-			if (!(e instanceof DeviceError && e.code === Err.UNKNOWN_CMD))
-				throw e;
-		}
-
-		// firmware before 0.3.0: ask the ECUs for PIDs 0x00, 0x20, ... directly
-		const bitmap = new Uint8Array(32);
-		for (let range = 0x00; range <= 0xE0; range += 0x20) {
-			let responses;
-			try {
-				responses = await this.obdRequest(Uint8Array.of(0x01, range));
-			} catch (e) {
-				if (range === 0x00 || !(e instanceof DeviceError && e.code === Err.TIMEOUT))
-					throw e;
-				break;
-			}
-			for (const r of responses)
-				if (r.message.length >= 6 && r.message[0] === 0x41 && r.message[1] === range)
-					for (let i = 0; i < 4; i++)
-						bitmap[range / 8 + i] |= r.message[2 + i];
-			if (!(bitmap[range / 8 + 3] & 0x01))
-				break;
-		}
-		return bitmap;
+		return await this.request(Cmd.GET_SUPPORTED_PIDS, undefined, OBD_TIMEOUT_MS);
 	}
 
 	// starts (or reconfigures) live polling of mode 01 PIDs; results arrive via onLiveData()

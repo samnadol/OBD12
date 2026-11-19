@@ -4,10 +4,11 @@
  *  Created on: Aug 1, 2025
  *      Author: samna
  *
- * One request is in flight at a time. A broadcast request collects
- * every response that arrives within the response window; a physically
- * addressed request finishes at the first response from its ECU. An ECU that
- * answers "response pending" (NRC 0x78) extends the window.
+ * One request is in flight at a time. While it is, ISO-TP and the CAN
+ * response filter are set up for its answers. A functional request collects
+ * every answer that arrives before its timeout; a physical request finishes
+ * at the first answer. An ECU that answers "response pending" (NRC 0x78)
+ * extends the wait to OBD_RESPONSE_PENDING_MS.
  *
  * Live polling asks for each PID on its own on the broadcast address until it
  * has seen an answer, and learns from it which ECU answers and how many data
@@ -35,7 +36,12 @@
 #define LIVE_BATCH_FAILURES_MAX 3
 
 #define RESPONSE_SID(sid) ((uint8_t) ((sid) + 0x40))
-#define IS_PHYSICAL(dest) ((dest) != OBD_ID_BROADCAST && (dest) != ISOTP_ID_FUNCTIONAL_29)
+
+// ISO 15765-4 responses to the OBD broadcast
+#define AUTO_RX_11      0x7E8u
+#define AUTO_RX_11_MASK 0x7F8u
+#define AUTO_RX_29      CAN_ID_RESPONSE_29
+#define AUTO_RX_29_MASK CAN_ID_RESPONSE_29_MASK
 
 static obd_addressing_t addressing = OBD_ADDRESSING_UNKNOWN;
 
@@ -47,8 +53,8 @@ static struct
 {
 	bool busy;
 	obd_request_t req;
-	uint32_t tx_id;             // the CAN ID the request went to
-	bool probing;               // a broadcast that may still be sent again on 29-bit
+	isotp_link_t link;          // where answers come from
+	bool probing;               // an AUTO request that may still be sent again on 29-bit
 	uint32_t start_tick;
 	uint32_t window_ms;
 	uint8_t responses;
@@ -80,7 +86,7 @@ static struct
 	uint32_t polled;            // bit i: pids[i] was requested in this cycle
 	uint32_t cycle_start;
 	uint16_t len;
-	uint8_t buf[OBD_RESULT_MAX];
+	uint8_t buf[OBD_LIVE_RESULT_MAX];
 } live;
 
 // what live polling has learned about each mode 01 PID from single answers;
@@ -107,6 +113,21 @@ static void try_parse_vin(const uint8_t *msg, uint16_t len)
 	if (!vin_valid)
 		PRINT_DBG("VIN: %.17s\r\n", vin);
 	vin_valid = true;
+}
+
+static uint32_t get_u32(const uint8_t *p)
+{
+	return p[0] | ((uint32_t) p[1] << 8) | ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
+}
+
+static uint16_t record_len(const uint8_t *rec)
+{
+	return rec[4] | ((uint16_t) rec[5] << 8);
+}
+
+static bool is_functional(const obd_request_t *req)
+{
+	return (req->flags & (OBD_FLAG_AUTO | OBD_FLAG_FUNCTIONAL)) != 0;
 }
 
 static bool live_batchable(uint8_t pid)
@@ -159,16 +180,15 @@ static void live_collect(obd_status_t status, const uint8_t *records, uint16_t r
 	uint16_t pos = 0;
 	while (status == OBD_STATUS_OK && pos + OBD_RECORD_HEADER <= records_len)
 	{
-		uint32_t source = records[pos] | ((uint32_t) records[pos + 1] << 8)
-				| ((uint32_t) records[pos + 2] << 16) | ((uint32_t) records[pos + 3] << 24);
-		uint8_t len = records[pos + 4];
+		uint32_t source = get_u32(&records[pos]);
+		uint16_t len = record_len(&records[pos]);
 		const uint8_t *msg = &records[pos + OBD_RECORD_HEADER];
 		pos += OBD_RECORD_HEADER + len;
 
-		if (len < 2 || msg[0] != RESPONSE_SID(OBD_SERVICE_DATA_LIVE))
+		if (len < 2 || len > 2 + 0xFF || msg[0] != RESPONSE_SID(OBD_SERVICE_DATA_LIVE))
 			continue;
 
-		if (!IS_PHYSICAL(req->dest))
+		if (is_functional(req))
 		{
 			// single PID: keep the first positive answer, and learn from it
 			if (msg[1] != pids[0])
@@ -187,7 +207,7 @@ static void live_collect(obd_status_t status, const uint8_t *records, uint16_t r
 
 	// a batched PID that did not come back is asked for on its own again, in
 	// this cycle, which also relearns its ECU and length
-	if (IS_PHYSICAL(req->dest))
+	if (!is_functional(req))
 	{
 		for (int j = 0; j < count; j++)
 		{
@@ -210,7 +230,7 @@ static bool pids_collect(const uint8_t *records, uint16_t records_len, uint8_t r
 	uint16_t pos = 0;
 	while (pos + OBD_RECORD_HEADER <= records_len)
 	{
-		uint8_t len = records[pos + 4];
+		uint16_t len = record_len(&records[pos]);
 		const uint8_t *msg = &records[pos + OBD_RECORD_HEADER];
 
 		// 41 <range> A B C D
@@ -272,6 +292,8 @@ static void pids_step(obd_status_t status, const uint8_t *records, uint16_t reco
 static void finish(obd_status_t status)
 {
 	active.busy = false;
+	ISOTP_SetLink(NULL);
+	CAN_ClearResponseFilter();
 
 	switch (active.req.kind)
 	{
@@ -297,7 +319,7 @@ static void finish(obd_status_t status)
 
 static void learn_addressing(uint32_t source)
 {
-	if (addressing != OBD_ADDRESSING_UNKNOWN)
+	if (addressing != OBD_ADDRESSING_UNKNOWN || !(active.req.flags & OBD_FLAG_AUTO))
 		return;
 
 	addressing = (source & CAN_ID_EXT) ? OBD_ADDRESSING_29BIT : OBD_ADDRESSING_11BIT;
@@ -311,8 +333,8 @@ void ISOTP_OnMessage(uint32_t source, const uint8_t *msg, uint16_t len)
 	if (!active.busy || len == 0)
 		return; // unsolicited or late
 
-	if (IS_PHYSICAL(active.tx_id) && source != ISOTP_ResponseIdFor(active.tx_id))
-		return;
+	if (!ISOTP_LinkMatches(&active.link, source))
+		return; // not from the ECUs this request went to
 
 	uint8_t sid = active.req.data[0];
 	bool negative = (msg[0] == OBD_NEGATIVE_RESPONSE);
@@ -339,19 +361,46 @@ void ISOTP_OnMessage(uint32_t source, const uint8_t *msg, uint16_t len)
 	learn_addressing(source);
 
 	uint16_t needed = OBD_RECORD_HEADER + len;
-	if (len <= 255 && active.result_len + needed <= sizeof(active.result))
+	if (active.result_len + needed <= sizeof(active.result))
 	{
 		uint8_t *rec = &active.result[active.result_len];
 		for (int i = 0; i < 4; i++)
 			rec[i] = (uint8_t) (source >> (8 * i));
 		rec[4] = (uint8_t) len;
+		rec[5] = (uint8_t) (len >> 8);
 		memcpy(rec + OBD_RECORD_HEADER, msg, len);
 		active.result_len += needed;
 	}
+	else
+	{
+		PRINT_DBG("OBD: answer from 0x%lx does not fit (%u bytes)\r\n", source, len);
+	}
 	active.responses++;
 
-	if (IS_PHYSICAL(active.req.dest))
+	if (!is_functional(&active.req))
 		finish(OBD_STATUS_OK);
+}
+
+// sets up ISO-TP and the CAN filter for the answers, and sends the request
+static void send_request(uint32_t tx_id, uint32_t rx_id, uint32_t rx_mask)
+{
+	const obd_request_t *req = &active.req;
+
+	active.link.rx_id = rx_id;
+	active.link.rx_mask = rx_mask;
+	active.link.fc_id = is_functional(req) ? 0 : tx_id;   // functional: each ECU's request ID
+	active.link.ext_addr = (req->flags & OBD_FLAG_EXT_ADDR) != 0;
+	active.link.tx_ext = req->tx_ext;
+	active.link.rx_ext = req->rx_ext;
+	active.link.pad = req->pad;
+	ISOTP_SetLink(&active.link);
+	CAN_SetResponseFilter(rx_id, rx_mask);
+
+	active.start_tick = HAL_GetTick();
+	active.window_ms = req->timeout_ms ? req->timeout_ms : OBD_RESPONSE_WINDOW_MS;
+
+	if (!ISOTP_SendSingle(tx_id, req->data, req->len))
+		finish(OBD_STATUS_TX_FAILED);
 }
 
 static void start_next_request(void)
@@ -366,19 +415,18 @@ static void start_next_request(void)
 	active.busy = true;
 	active.responses = 0;
 	active.result_len = 0;
-	active.start_tick = HAL_GetTick();
-	active.window_ms = OBD_RESPONSE_WINDOW_MS;
-	active.tx_id = active.req.dest;
 	active.probing = false;
 
-	if (active.req.dest == OBD_ID_BROADCAST)
+	const obd_request_t *req = &active.req;
+	if (!(req->flags & OBD_FLAG_AUTO))
+		send_request(req->tx_id, req->rx_id, req->rx_mask);
+	else if (addressing == OBD_ADDRESSING_29BIT)
+		send_request(ISOTP_ID_FUNCTIONAL_29, AUTO_RX_29, AUTO_RX_29_MASK);
+	else
 	{
-		active.tx_id = (addressing == OBD_ADDRESSING_29BIT) ? ISOTP_ID_FUNCTIONAL_29 : ISOTP_ID_FUNCTIONAL_11;
 		active.probing = (addressing == OBD_ADDRESSING_UNKNOWN);
+		send_request(ISOTP_ID_FUNCTIONAL_11, AUTO_RX_11, AUTO_RX_11_MASK);
 	}
-
-	if (!ISOTP_SendSingle(active.tx_id, active.req.data, active.req.len))
-		finish(OBD_STATUS_TX_FAILED);
 }
 
 // nobody answered the broadcast on 0x7DF: ask again on 0x18DB33F1
@@ -387,12 +435,7 @@ static void probe_29bit(void)
 	CAN_AbortPendingTx();
 
 	active.probing = false;
-	active.tx_id = ISOTP_ID_FUNCTIONAL_29;
-	active.start_tick = HAL_GetTick();
-	active.window_ms = OBD_RESPONSE_WINDOW_MS;
-
-	if (!ISOTP_SendSingle(active.tx_id, active.req.data, active.req.len))
-		finish(OBD_STATUS_TX_FAILED);
+	send_request(ISOTP_ID_FUNCTIONAL_29, AUTO_RX_29, AUTO_RX_29_MASK);
 }
 
 static void pids_process(void)
@@ -401,11 +444,11 @@ static void pids_process(void)
 		return;
 
 	obd_request_t req = {
-		.dest = OBD_ID_BROADCAST,
 		.len = 2,
 		.data = { OBD_SERVICE_DATA_LIVE, pids.range },
 		.kind = OBD_KIND_PIDS,
 	};
+	OBD_SetBroadcast(&req);
 
 	if (OBD_Submit(&req))
 		pids.request_pending = true;
@@ -444,18 +487,18 @@ static void live_process(void)
 
 	uint8_t pid = live.pids[first];
 	obd_request_t req = {
-		.dest = OBD_ID_BROADCAST,
 		.len = 2,
 		.data = { OBD_SERVICE_DATA_LIVE, pid },
 		.kind = OBD_KIND_LIVE,
 	};
+	OBD_SetBroadcast(&req);
 	uint32_t picked = 1u << first;
 
 	if (live_batchable(pid))
 	{
 		// this PID and the next unpolled ones from the same ECU, physically addressed
 		uint32_t ecu = pid_info[pid].ecu;
-		req.dest = ISOTP_RequestIdFor(ecu);
+		OBD_SetPhysical(&req, ecu);
 		for (int i = first + 1; i < live.count && req.len < 1 + LIVE_BATCH_MAX; i++)
 		{
 			uint8_t p = live.pids[i];
@@ -477,11 +520,11 @@ static void live_process(void)
 void OBD_Init(void)
 {
 	obd_request_t req = {
-		.dest = OBD_ID_BROADCAST,
 		.len = 2,
 		.data = { OBD_SERVICE_INFO_VEHICLE, OBD_S9_PID_VIN },
 		.kind = OBD_KIND_VIN,
 	};
+	OBD_SetBroadcast(&req);
 	OBD_Submit(&req);
 
 	OBD_DiscoverPids();
@@ -513,12 +556,33 @@ void OBD_Process(void)
 
 bool OBD_Submit(const obd_request_t *req)
 {
-	if (queue_count == QUEUE_SIZE || req->len == 0 || req->len > 7)
+	if (queue_count == QUEUE_SIZE || req->len == 0 || req->len > ISOTP_SingleMax(req->flags & OBD_FLAG_EXT_ADDR))
 		return false;
 
 	queue[(queue_head + queue_count) % QUEUE_SIZE] = *req;
 	queue_count++;
 	return true;
+}
+
+void OBD_SetBroadcast(obd_request_t *req)
+{
+	req->flags = OBD_FLAG_AUTO | OBD_FLAG_FUNCTIONAL;
+	req->tx_id = 0;
+	req->rx_id = 0;
+	req->rx_mask = 0;
+	req->tx_ext = 0;
+	req->rx_ext = 0;
+	req->pad = 0;
+	req->timeout_ms = 0;
+}
+
+void OBD_SetPhysical(obd_request_t *req, uint32_t response_id)
+{
+	OBD_SetBroadcast(req);
+	req->flags = 0;
+	req->tx_id = ISOTP_RequestIdFor(response_id);
+	req->rx_id = response_id;
+	req->rx_mask = CAN_ID_BITS(response_id);
 }
 
 obd_addressing_t OBD_GetAddressing(void)

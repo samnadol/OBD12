@@ -34,33 +34,68 @@ static struct
 static bool reset_pending;
 static uint32_t reset_requested_tick;
 
-// OBD services that only read data; anything else can change the vehicle state
-static bool obd_service_is_read_only(uint8_t sid)
+_Static_assert(DIAG_FLAG_AUTO == OBD_FLAG_AUTO && DIAG_FLAG_FUNCTIONAL == OBD_FLAG_FUNCTIONAL
+		&& DIAG_FLAG_EXT_ADDR == OBD_FLAG_EXT_ADDR, "DIAG_FLAG_* and OBD_FLAG_* differ");
+
+typedef enum
 {
-	switch (sid)
+	SERVICE_READ,               // only reads: allowed on any link
+	SERVICE_AUTH,               // changes stored state (clears DTCs, runs a test): authorized links only
+	SERVICE_BLOCKED,            // never sent
+} service_policy_t;
+
+// Diagnostic services by what they can do to the vehicle. Anything not listed
+// (writes, security access, routines, I/O control, downloads, ECU reset,
+// communication control, programming sessions) is never sent.
+static service_policy_t service_policy(const uint8_t *data, uint8_t len)
+{
+	switch (data[0])
 	{
-	case OBD_SERVICE_DATA_LIVE:
-	case OBD_SERVICE_DATA_FREEZE:
-	case OBD_SERVICE_DTC_STORED:
-	case OBD_SERVICE_TEST_O2:
-	case OBD_SERVICE_TEST_OTHER:
-	case OBD_SERVICE_DTC_PENDING:
-	case OBD_SERVICE_INFO_VEHICLE:
-	case OBD_SERVICE_DTC_PERMANENT:
-		return true;
+	case 0x01: case 0x02: case 0x03: case 0x05:    // SAE J1979
+	case 0x06: case 0x07: case 0x09: case 0x0A:
+	case 0x19:                  // UDS ReadDTCInformation
+	case 0x1A:                  // KWP2000 ReadEcuIdentification, GMLAN ReadDataByIdentifier
+	case 0x21:                  // KWP2000 ReadDataByLocalIdentifier
+	case 0x22:                  // ReadDataByIdentifier
+	case 0x3E:                  // TesterPresent
+	case 0xA9:                  // GMLAN ReadDiagnosticInformation
+	case 0xAA:                  // GMLAN ReadDataByPacketIdentifier
+		return SERVICE_READ;
+
+	case 0x10:                  // DiagnosticSessionControl: default or extended session only
+	{
+		uint8_t session = (len > 1) ? (data[1] & 0x7F) : 0;   // bit 7: suppress positive response
+		return (session == 0x01 || session == 0x03) ? SERVICE_READ : SERVICE_BLOCKED;
+	}
+
+	case 0x04:                  // SAE J1979 clear DTCs
+	case 0x08:                  // SAE J1979 on-board tests (e.g. EVAP leak test)
+	case 0x14:                  // UDS / KWP2000 ClearDiagnosticInformation
+		return SERVICE_AUTH;
+
 	default:
-		return false;
+		return SERVICE_BLOCKED;
 	}
 }
 
-// the OBD broadcast, or an ISO 15765-4 functional or physical request ID
-static bool obd_dest_valid(uint32_t dest)
+static bool can_id_valid(uint32_t id)
 {
-	if (dest == OBD_ID_BROADCAST || dest == ISOTP_ID_FUNCTIONAL_29)
-		return true;
-	if (dest >= OBD_ID_ENGINE && dest <= OBD_ID_ENGINE + 7)
-		return true;
-	return (dest & ~0xFF00u) == ISOTP_ID_REQUEST_29;
+	return (id & ~(CAN_ID_EXT | CAN_ID_BITS(id))) == 0;
+}
+
+// IDs a request may be sent on: diagnostic IDs only, so a host cannot send
+// frames that modules take as normal bus traffic
+static bool tx_id_permitted(uint32_t id)
+{
+	if (id & CAN_ID_EXT)
+	{
+		// ISO 15765-2 normal fixed addressing: PF 0xDA physical, 0xDB functional
+		uint8_t pf = (uint8_t) (id >> 16);
+		return pf == 0xDA || pf == 0xDB;
+	}
+	return id >= 0x600                      // ISO 15765-4 (0x7DF, 0x7E0-0x7E7) and manufacturer diagnostic IDs
+			|| (id >= 0x240 && id <= 0x25F) // GMLAN USDT physical requests
+			|| id == 0x101;                 // GMLAN AllNodes
 }
 
 static bool require_auth(transport_id_t t, uint8_t seq, uint8_t id)
@@ -127,41 +162,75 @@ static void handle_get_info(transport_id_t t, uint8_t seq)
 	comms_reply(t, seq, CMD_GET_INFO, &info, sizeof(info));
 }
 
-static void handle_obd_request(transport_id_t t, uint8_t seq, const uint8_t *p, uint16_t len)
+static bool diag_request_valid(const proto_diag_request_t *d, uint8_t data_len)
 {
-	if (len < 5 || len > 11)
+	bool ext_addr = (d->flags & DIAG_FLAG_EXT_ADDR) != 0;
+
+	if ((d->flags & ~OBD_FLAGS_ALL) || data_len == 0 || data_len > ISOTP_SingleMax(ext_addr)
+			|| d->timeout_ms > OBD_RESPONSE_PENDING_MS)
+		return false;
+
+	if (d->flags & DIAG_FLAG_AUTO)
+		return !ext_addr && d->tx_id == 0 && d->rx_id == 0 && d->rx_mask == 0;
+
+	return can_id_valid(d->tx_id) && can_id_valid(d->rx_id) && (d->rx_mask & ~CAN_ID_BITS(d->rx_id)) == 0;
+}
+
+static void handle_diag_request(transport_id_t t, uint8_t seq, const uint8_t *p, uint16_t len)
+{
+	proto_diag_request_t d;
+	if (len <= sizeof(d) || len > sizeof(d) + 7)
 	{
-		comms_error(t, seq, CMD_OBD_REQUEST, ERR_BAD_REQUEST);
+		comms_error(t, seq, CMD_DIAG_REQUEST, ERR_BAD_REQUEST);
+		return;
+	}
+	memcpy(&d, p, sizeof(d));
+	const uint8_t *data = p + sizeof(d);
+	uint8_t data_len = (uint8_t) (len - sizeof(d));
+
+	if (!diag_request_valid(&d, data_len))
+	{
+		comms_error(t, seq, CMD_DIAG_REQUEST, ERR_BAD_REQUEST);
 		return;
 	}
 
-	uint32_t dest = p[0] | ((uint32_t) p[1] << 8) | ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
-	if (!obd_dest_valid(dest))
+	service_policy_t policy = service_policy(data, data_len);
+	if (policy == SERVICE_BLOCKED || (!(d.flags & DIAG_FLAG_AUTO) && !tx_id_permitted(d.tx_id)))
 	{
-		comms_error(t, seq, CMD_OBD_REQUEST, ERR_BAD_REQUEST);
+		comms_error(t, seq, CMD_DIAG_REQUEST, ERR_NOT_PERMITTED);
 		return;
 	}
-
-	if (!obd_service_is_read_only(p[4]) && !require_auth(t, seq, CMD_OBD_REQUEST))
+	if (policy == SERVICE_AUTH && !require_auth(t, seq, CMD_DIAG_REQUEST))
 		return;
 
 	if (!can_usable())
 	{
-		comms_error(t, seq, CMD_OBD_REQUEST, ERR_CAN);
+		comms_error(t, seq, CMD_DIAG_REQUEST, ERR_CAN);
 		return;
 	}
 
 	obd_request_t req = {
-		.dest = dest,
-		.len = (uint8_t) (len - 4),
+		.flags = d.flags,
+		.tx_id = d.tx_id,
+		.rx_id = d.rx_id,
+		.rx_mask = d.rx_mask,
+		.tx_ext = d.tx_ext,
+		.rx_ext = d.rx_ext,
+		.pad = d.pad,
+		.timeout_ms = d.timeout_ms,
+		.len = data_len,
 		.kind = OBD_KIND_HOST,
 		.transport = t,
 		.seq = seq,
 	};
-	memcpy(req.data, p + 4, req.len);
+	if (d.flags & DIAG_FLAG_AUTO)
+		req.flags |= DIAG_FLAG_FUNCTIONAL;
+	else if (req.rx_mask == 0)
+		req.rx_mask = CAN_ID_BITS(req.rx_id);
+	memcpy(req.data, data, data_len);
 
 	if (!OBD_Submit(&req))
-		comms_error(t, seq, CMD_OBD_REQUEST, ERR_BUSY);
+		comms_error(t, seq, CMD_DIAG_REQUEST, ERR_BUSY);
 }
 
 static void handle_get_vin(transport_id_t t, uint8_t seq)
@@ -180,13 +249,13 @@ static void handle_get_vin(transport_id_t t, uint8_t seq)
 	}
 
 	obd_request_t req = {
-		.dest = OBD_ID_BROADCAST,
 		.len = 2,
 		.data = { OBD_SERVICE_INFO_VEHICLE, OBD_S9_PID_VIN },
 		.kind = OBD_KIND_HOST_VIN,
 		.transport = t,
 		.seq = seq,
 	};
+	OBD_SetBroadcast(&req);
 
 	if (!OBD_Submit(&req))
 		comms_error(t, seq, CMD_GET_VIN, ERR_BUSY);
@@ -309,8 +378,8 @@ void commands_handle(transport_id_t t, uint8_t seq, uint8_t id, const uint8_t *p
 			comms_error(t, seq, id, ERR_UNAVAILABLE);
 		break;
 
-	case CMD_OBD_REQUEST:
-		handle_obd_request(t, seq, p, len);
+	case CMD_DIAG_REQUEST:
+		handle_diag_request(t, seq, p, len);
 		break;
 
 	case CMD_GET_VIN:
@@ -358,7 +427,7 @@ void commands_process(void)
 void OBD_OnRequestDone(const obd_request_t *req, obd_status_t status, const uint8_t *records, uint16_t records_len)
 {
 	transport_id_t t = (transport_id_t) req->transport;
-	uint8_t id = (req->kind == OBD_KIND_HOST_VIN) ? CMD_GET_VIN : CMD_OBD_REQUEST;
+	uint8_t id = (req->kind == OBD_KIND_HOST_VIN) ? CMD_GET_VIN : CMD_DIAG_REQUEST;
 
 	if (status == OBD_STATUS_TX_FAILED)
 	{

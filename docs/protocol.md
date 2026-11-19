@@ -1,4 +1,4 @@
-# OBD12 host protocol (version 3)
+# OBD12 host protocol (version 4)
 
 The same protocol runs over the USB serial port (115200 8N1) and the BLE Nordic UART service. The source of truth is `firmware/OBD12/Core/Inc/Comms/protocol.h` and `software/obd12/protocol.py` mirrors it.
 
@@ -24,7 +24,7 @@ Each frame is [COBS](https://en.wikipedia.org/wiki/Consistent_Overhead_Byte_Stuf
 | 0 | 1 | type |
 | 1 | 1 | seq |
 | 2 | 1 | id (command or event) |
-| 3 | 0–240 | payload |
+| 3 | 0–512 | payload |
 | end − 2 | 2 | CRC-16/CCITT-FALSE over type, seq, id, payload (little-endian) |
 
 CRC-16/CCITT-FALSE: polynomial `0x1021`, initial value `0xFFFF`, no reflection, no final XOR. `crc16("123456789") = 0x29B1`.
@@ -55,7 +55,7 @@ Every REQ gets exactly one RSP or ERR with the same `seq` and `id`. Requests may
 | `0x05` | GET_CAN_STATS | – | 6 × `u32`: rx_frames, rx_dropped, tx_frames, tx_failed, bus_off_count, transceiver_faults | |
 | `0x06` | RESET | – | – (the device reboots after the answer) | yes |
 | `0x07` | BLE_CLEAR_BONDS | – | – | yes |
-| `0x10` | OBD_REQUEST | `dest u32`, 1–7 request bytes | OBD records | for services other than 01, 02, 03, 05, 06, 07, 09, 0A |
+| `0x10` | DIAG_REQUEST | target (18 bytes), 1–7 request bytes | diagnostic records | clearing DTCs and J1979 tests (below) |
 | `0x11` | GET_VIN | – | 17 ASCII characters | |
 | `0x12` | LIVE_START | `interval_ms u16`, 1–32 mode 01 PIDs | – | |
 | `0x13` | LIVE_STOP | – | – | |
@@ -65,33 +65,63 @@ Every REQ gets exactly one RSP or ERR with the same `seq` and `id`. Requests may
 
 USB is always authorized. A BLE link is authorized once it is encrypted. Pairing requires MITM protection, using the 6-digit passkey reported by `GET_INFO` over USB. A command that needs authorization on an unauthorized BLE link fails with `NOT_AUTHORIZED`, and the device asks the central to pair. Retry the command once pairing completes.
 
-### OBD_REQUEST
+### DIAG_REQUEST
 
-CAN IDs (`dest`, and the ECU ID in the records) are u32. Bit 31 marks a 29-bit ID, as in Linux SocketCAN: `0x000007E8` is 11-bit `7E8`, `0x98DAF110` is 29-bit `18DAF110`. Addressing follows ISO 15765-4 with the tester at `F1`.
+Sends one diagnostic request (SAE J1979 OBD-II, UDS, KWP2000 or GMLAN over ISO 15765) and returns the answers. The request is described by a target, followed by the request bytes: the service ID and its parameters, e.g. `01 0C` for engine RPM or `22 F1 90` for the UDS VIN. The request is sent as one ISO-TP single frame, so it is 1–7 bytes, or 1–6 with extended addressing. Answers can be single- or multi-frame, up to 256 bytes each.
 
-| `dest` | Meaning |
-|---|---|
-| `0x7DF` | the vehicle's OBD broadcast: `7DF` on 11-bit vehicles, `18DB33F1` on 29-bit ones |
-| `0x7E0`–`0x7E7` | one ECU, 11-bit; it answers on `dest + 8` |
-| `0x98DB33F1` | 29-bit broadcast |
-| `0x98DAxxF1` | one ECU (address `xx`), 29-bit; it answers on `18DAF1xx` |
+CAN IDs are u32. Bit 31 marks a 29-bit ID, as in Linux SocketCAN: `0x000007E8` is 11-bit `7E8`, `0x98DAF110` is 29-bit `18DAF110`.
 
-The request bytes are the OBD service ID followed by its parameters, e.g. `01 0C` for engine RPM. They are sent as one ISO-TP single frame.
+**Target** (18 bytes):
 
-- **Broadcast:** the device collects every answer that arrives within 50 ms. The window stays open while a multi-frame answer is still arriving.
-- **Physical (one ECU):** the request completes at the first answer from that ECU.
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | flags: `0x01` AUTO, `0x02` FUNCTIONAL, `0x04` EXT_ADDR |
+| 1 | u32 | `tx_id`: CAN ID the request is sent on |
+| 5 | u32 | `rx_id`: answers come from CAN IDs that match `rx_id` … |
+| 9 | u32 | `rx_mask`: … on these bits. 0 = all bits (one ECU) |
+| 13 | u8 | `tx_ext`: with EXT_ADDR, the address byte sent before the PCI |
+| 14 | u8 | `rx_ext`: with EXT_ADDR, the address byte answers carry; frames with another byte are ignored |
+| 15 | u8 | `pad`: padding byte for unused bytes of the frames the device sends (request and flow control) |
+| 16 | u16 | `timeout_ms`: how long to wait, at most 5000. 0 = 50 ms |
+
+- **AUTO:** the vehicle's OBD broadcast, `7DF` on 11-bit vehicles and `18DB33F1` on 29-bit ones, collecting the answers from `7E8`–`7EF` or `18DAF1xx`. `tx_id`, `rx_id` and `rx_mask` must be 0 and EXT_ADDR must be clear. This is what generic OBD-II requests use.
+- **FUNCTIONAL:** several ECUs may answer. The device collects every answer that arrives within the timeout, and keeps waiting while a multi-frame answer is still arriving. Flow control goes to each ECU's ISO 15765-4 request ID (`7E8` → `7E0`, `18DAF110` → `18DA10F1`).
+- **Physical (neither flag):** the request completes at the first answer. Flow control goes to `tx_id`.
+- **EXT_ADDR:** ISO 15765-2 extended addressing, as Toyota uses on `750`/`758`: every frame carries an address byte before the PCI, so single frames carry 6 bytes.
 - **"Response pending" (NRC `0x78`):** extends the wait to 5 s.
-- **Addressing detection:** until a vehicle has answered, a `0x7DF` broadcast that gets no answer within 50 ms is sent again on `18DB33F1` (the ISO 15765-4 initialisation sequence). The first answer decides 11- or 29-bit, which `GET_INFO` reports, and the device keeps it for as long as it is powered.
+- **Addressing detection:** until a vehicle has answered, an AUTO request that gets no answer within its timeout is sent again on `18DB33F1` (the ISO 15765-4 initialisation sequence). The first answer to an AUTO request decides 11- or 29-bit, which `GET_INFO` reports, and the device keeps it for as long as it is powered.
+
+Examples:
+
+| Request | flags | `tx_id` | `rx_id` | `rx_mask` | ext | timeout |
+|---|---|---|---|---|---|---|
+| OBD-II, any vehicle | AUTO | 0 | 0 | 0 | | 0 |
+| Engine ECU, 11-bit | 0 | `0x7E0` | `0x7E8` | 0 | | 0 |
+| Engine ECU, 29-bit | 0 | `0x98DA10F1` | `0x98DAF110` | 0 | | 0 |
+| Toyota body ECU | EXT_ADDR | `0x750` | `0x758` | 0 | `40` / `40` | 600 |
+| GM Global B module `40` | 0 | `0x94DA40F1` | `0x942AF140` | 0 | | 0 |
+| Every Honda module | FUNCTIONAL | `0x98DBEFF1` | `0x98DAF100` | `0x1FFFFF00` | | 100 |
 
 The response is a list of records, one per answering ECU:
 
 | Size | Field |
 |---|---|
-| 4 | ECU ID: the CAN ID it answered on (`0x7E8`–`0x7EF`, or `0x98DAF1xx`) |
-| 1 | message length `n` |
+| 4 | ECU ID: the CAN ID it answered on |
+| 2 | message length `n` |
 | n | response message: `SID + 0x40` followed by data, or `7F <SID> <NRC>` for a negative response |
 
-No answer at all gives `ERR TIMEOUT`. CAN being unusable (bus-off, TX failure) gives `ERR CAN`. A full request queue gives `ERR BUSY`.
+Records that would not fit the 512-byte payload are dropped. No answer at all gives `ERR TIMEOUT`. CAN being unusable (bus-off, TX failure) gives `ERR CAN`. A full request queue gives `ERR BUSY`. A malformed target gives `ERR BAD_REQUEST`.
+
+**What the device sends.** It never sends a request that could change how the vehicle behaves. Requests outside these rules fail with `ERR NOT_PERMITTED`, on every link:
+
+| Services | Allowed |
+|---|---|
+| J1979 `01`, `02`, `03`, `05`, `06`, `07`, `09`, `0A`; `19` ReadDTCInformation; `1A`, `21`, `22` read data; `3E` TesterPresent; GMLAN `A9`, `AA` | always |
+| `10` DiagnosticSessionControl | default (`01`) and extended (`03`) sessions only |
+| J1979 `04` and UDS/KWP `14` clear DTCs, J1979 `08` on-board tests | on authorized links only |
+| everything else: writes, security access, routines, I/O control, ECU reset, communication control, downloads, programming sessions | never |
+
+`tx_id` must be a diagnostic ID: 11-bit `0x600`–`0x7FF`, GMLAN `0x101` and `0x240`–`0x25F`, or 29-bit `xxDAxxxx` / `xxDBxxxx` (ISO 15765-2 normal fixed addressing). The device never sends on other IDs, where modules would read the frame as normal bus traffic.
 
 ### GET_VIN and GET_SUPPORTED_PIDS
 
@@ -100,7 +130,6 @@ At startup the device reads the VIN (mode 09 PID 02) and the supported mode 01 P
 - **Supported PIDs:** the device asks for PID `0x00`, then `0x20`, `0x40`, … up to `0xE0`. It moves to the next range only while some ECU reports that range as supported (the last bit of the previous answer). Answers from all ECUs are combined.
 - **Bitmap:** the 32 bytes are the A–D data bytes of the answers to `0x00`, `0x20`, … `0xE0`, one after another. PID `p` (`0x01`–`0xFF`) is supported if byte `(p − 1) / 8` has bit `0x80 >> ((p − 1) % 8)` set. The range PIDs (`0x20`, `0x40`, …) appear as supported when the next range exists; they carry no data.
 - **If the startup read failed:** for example, the ignition was off. A `GET_VIN` or `GET_SUPPORTED_PIDS` request then reads again and answers when done, or with `ERR TIMEOUT` if no ECU answered. Allow several seconds.
-- **Older firmware:** firmware before 0.3.0 answers `GET_SUPPORTED_PIDS` with `UNKNOWN_CMD`. The host clients then send `01 00`, `01 20`, … through `OBD_REQUEST` themselves.
 
 ### LIVE_START / LIVE_STOP
 
@@ -136,6 +165,7 @@ Topics for `SET_EVENTS` are bit flags: `0x01` LOG, `0x02` POWER, `0x04` CAN_STAT
 | `0x05` | NOT_AUTHORIZED | needs an authorized link (see above) |
 | `0x06` | CAN | CAN bus not usable |
 | `0x07` | UNAVAILABLE | feature not available (e.g. no BLE module) |
+| `0x08` | NOT_PERMITTED | `DIAG_REQUEST` with a service or CAN ID the device never sends (see above) |
 
 ## Structures
 
@@ -143,7 +173,7 @@ Topics for `SET_EVENTS` are bit flags: `0x01` LOG, `0x02` POWER, `0x04` CAN_STAT
 
 | Offset | Type | Field |
 |---|---|---|
-| 0 | u8 | protocol version (3) |
+| 0 | u8 | protocol version (4) |
 | 1 | u8 × 3 | firmware version major, minor, patch |
 | 4 | u8 | HWCONF strap (bit 0 = HWCONF0) |
 | 5 | u8 | reset cause: 0 unknown, 1 power-on, 2 reset pin, 3 software, 4 watchdog, 5 window watchdog, 6 low-power, 7 fatal error |

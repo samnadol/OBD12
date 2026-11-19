@@ -24,10 +24,18 @@ typedef struct
 	uint16_t received;
 	uint8_t next_sn;
 	uint32_t last_frame_tick;
+	// flow control, from the link the first frame arrived on
+	uint32_t fc_id;
+	bool ext_addr;
+	uint8_t tx_ext;
+	uint8_t pad;
 	uint8_t buf[ISOTP_MAX_MESSAGE];
 } isotp_session_t;
 
 static isotp_session_t sessions[ISOTP_SESSIONS];
+
+static isotp_link_t link;
+static bool link_set;
 
 // 29-bit normal fixed addressing swaps target and source address bytes:
 // 0x18DAF110 (ECU 0x10 -> tester) <-> 0x18DA10F1 (tester -> ECU 0x10)
@@ -44,6 +52,23 @@ uint32_t ISOTP_RequestIdFor(uint32_t response)
 uint32_t ISOTP_ResponseIdFor(uint32_t request)
 {
 	return (request & CAN_ID_EXT) ? swap_addresses(request) : request + 8;
+}
+
+bool ISOTP_LinkMatches(const isotp_link_t *l, uint32_t id)
+{
+	return ((id ^ l->rx_id) & (l->rx_mask | CAN_ID_EXT)) == 0;
+}
+
+void ISOTP_SetLink(const isotp_link_t *l)
+{
+	link_set = (l != NULL);
+	if (l)
+		link = *l;
+}
+
+uint8_t ISOTP_SingleMax(bool ext_addr)
+{
+	return ext_addr ? 6 : 7;
 }
 
 // the session receiving from `source`, if any
@@ -63,17 +88,31 @@ static isotp_session_t *free_session(void)
 	return NULL;
 }
 
-static void send_flow_control(uint32_t source, uint8_t flow_status)
+// builds an 8-byte frame: [address byte] PCI ... padding; returns where the PCI goes
+static uint8_t *frame_start(uint8_t frame[8], bool ext_addr, uint8_t ext, uint8_t pad)
+{
+	memset(frame, pad, 8);
+	if (!ext_addr)
+		return frame;
+	frame[0] = ext;
+	return frame + 1;
+}
+
+static void send_flow_control(uint32_t fc_id, bool ext_addr, uint8_t tx_ext, uint8_t pad, uint8_t flow_status)
 {
 	// block size 0 (send everything), separation time 0
-	uint8_t frame[8] = { (CAN_PCI_FC << 4) | flow_status, 0, 0 };
-	CAN_Tx(ISOTP_RequestIdFor(source), frame);
+	uint8_t frame[8];
+	uint8_t *pci = frame_start(frame, ext_addr, tx_ext, pad);
+	pci[0] = (CAN_PCI_FC << 4) | flow_status;
+	pci[1] = 0;
+	pci[2] = 0;
+	CAN_Tx(fc_id, frame);
 }
 
 static void on_single_frame(uint32_t source, const uint8_t *data, uint8_t dlc)
 {
 	uint8_t len = data[0] & 0x0F;
-	if (len == 0 || len > 7 || len > dlc - 1)
+	if (len == 0 || len > dlc - 1)
 	{
 		PRINT_DBG("ISO-TP 0x%lx: bad single frame length %u\r\n", source, len);
 		return;
@@ -82,16 +121,22 @@ static void on_single_frame(uint32_t source, const uint8_t *data, uint8_t dlc)
 	ISOTP_OnMessage(source, data + 1, len);
 }
 
-static void on_first_frame(uint32_t source, const uint8_t *data, uint8_t dlc)
+// l: the link the frame arrived on, or NULL for normal addressing
+static void on_first_frame(uint32_t source, const isotp_link_t *l, const uint8_t *data, uint8_t dlc)
 {
 	uint16_t len = ((uint16_t) (data[0] & 0x0F) << 8) | data[1];
+	bool ext_addr = l && l->ext_addr;
+	uint32_t fc_id = (l && l->fc_id) ? l->fc_id : ISOTP_RequestIdFor(source);
+	uint8_t tx_ext = l ? l->tx_ext : 0;
+	uint8_t pad = l ? l->pad : 0;
 
 	// a new first frame from the same ECU replaces its unfinished message
 	isotp_session_t *s = find_session(source);
 	if (s)
 		s->active = false;
 
-	if (len < 8 || dlc < 8)
+	// a first frame fills the CAN frame: 8 bytes, 7 after the address byte
+	if (len <= ISOTP_SingleMax(ext_addr) || dlc != (ext_addr ? 7 : 8))
 	{
 		PRINT_DBG("ISO-TP 0x%lx: bad first frame (len %u, dlc %u)\r\n", source, len, dlc);
 		return;
@@ -100,7 +145,7 @@ static void on_first_frame(uint32_t source, const uint8_t *data, uint8_t dlc)
 	if (len > ISOTP_MAX_MESSAGE)
 	{
 		PRINT_DBG("ISO-TP 0x%lx: message too long (%u)\r\n", source, len);
-		send_flow_control(source, FC_OVERFLOW);
+		send_flow_control(fc_id, ext_addr, tx_ext, pad, FC_OVERFLOW);
 		return;
 	}
 
@@ -108,25 +153,29 @@ static void on_first_frame(uint32_t source, const uint8_t *data, uint8_t dlc)
 	if (!s)
 	{
 		PRINT_DBG("ISO-TP 0x%lx: too many ECUs answering at once\r\n", source);
-		send_flow_control(source, FC_OVERFLOW);
+		send_flow_control(fc_id, ext_addr, tx_ext, pad, FC_OVERFLOW);
 		return;
 	}
 
 	s->active = true;
 	s->source = source;
 	s->expected = len;
-	s->received = 6;
+	s->received = dlc - 2;
 	s->next_sn = 1;
 	s->last_frame_tick = HAL_GetTick();
-	memcpy(s->buf, data + 2, 6);
+	s->fc_id = fc_id;
+	s->ext_addr = ext_addr;
+	s->tx_ext = tx_ext;
+	s->pad = pad;
+	memcpy(s->buf, data + 2, s->received);
 
-	send_flow_control(source, FC_CONTINUE_TO_SEND);
+	send_flow_control(fc_id, ext_addr, tx_ext, pad, FC_CONTINUE_TO_SEND);
 }
 
-static void on_consecutive_frame(uint32_t source, const uint8_t *data, uint8_t dlc)
+static void on_consecutive_frame(uint32_t source, bool ext_addr, const uint8_t *data, uint8_t dlc)
 {
 	isotp_session_t *s = find_session(source);
-	if (!s)
+	if (!s || s->ext_addr != ext_addr)
 		return; // not ours, or the session was aborted
 
 	uint8_t sn = data[0] & 0x0F;
@@ -156,6 +205,18 @@ static void on_consecutive_frame(uint32_t source, const uint8_t *data, uint8_t d
 
 void ISOTP_OnFrame(uint32_t source, const uint8_t *data, uint8_t dlc)
 {
+	const isotp_link_t *l = (link_set && ISOTP_LinkMatches(&link, source)) ? &link : NULL;
+	bool ext_addr = l && l->ext_addr;
+
+	if (ext_addr)
+	{
+		// the address byte comes before the PCI; another target's frame is not ours
+		if (dlc < 1 || data[0] != l->rx_ext)
+			return;
+		data++;
+		dlc--;
+	}
+
 	if (dlc < 2)
 		return;
 
@@ -165,10 +226,10 @@ void ISOTP_OnFrame(uint32_t source, const uint8_t *data, uint8_t dlc)
 		on_single_frame(source, data, dlc);
 		break;
 	case CAN_PCI_FF:
-		on_first_frame(source, data, dlc);
+		on_first_frame(source, l, data, dlc);
 		break;
 	case CAN_PCI_CF:
-		on_consecutive_frame(source, data, dlc);
+		on_consecutive_frame(source, ext_addr, data, dlc);
 		break;
 	case CAN_PCI_FC:
 		break; // we never send multi-frame requests
@@ -200,11 +261,13 @@ bool ISOTP_Busy(void)
 
 bool ISOTP_SendSingle(uint32_t dest, const uint8_t *data, uint8_t len)
 {
-	if (len == 0 || len > 7)
+	bool ext_addr = link_set && link.ext_addr;
+	if (len == 0 || len > ISOTP_SingleMax(ext_addr))
 		return false;
 
-	uint8_t frame[8] = { 0 };
-	frame[0] = (CAN_PCI_SF << 4) | len;
-	memcpy(frame + 1, data, len);
+	uint8_t frame[8];
+	uint8_t *pci = frame_start(frame, ext_addr, link.tx_ext, link_set ? link.pad : 0);
+	pci[0] = (CAN_PCI_SF << 4) | len;
+	memcpy(pci + 1, data, len);
 	return CAN_Tx(dest, frame);
 }

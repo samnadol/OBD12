@@ -24,11 +24,11 @@
 
 #include <stdint.h>
 
-#define PROTO_VERSION 3
+#define PROTO_VERSION 4
 
 #define PROTO_HEADER_LEN   3
 #define PROTO_CRC_LEN      2
-#define PROTO_MAX_PAYLOAD  240
+#define PROTO_MAX_PAYLOAD  512
 #define PROTO_MAX_FRAME    (PROTO_HEADER_LEN + PROTO_MAX_PAYLOAD + PROTO_CRC_LEN)
 #define PROTO_MAX_ENCODED  (PROTO_MAX_FRAME + PROTO_MAX_FRAME / 254 + 1)   // without the 0x00 delimiter
 
@@ -52,10 +52,9 @@ typedef enum
 	CMD_BLE_CLEAR_BONDS = 0x07, // req: -                  rsp: -                       [auth]
 
 	// vehicle
-	CMD_OBD_REQUEST = 0x10,     // req: u32 dest, 1-7 request bytes   rsp: OBD records (see below)
-	                            //      dest: 0x7DF = the vehicle's OBD broadcast (11- or 29-bit, see
-	                            //      obd_addressing), 0x7E0-0x7E7, 0x98DB33F1, 0x98DAxxF1
-	                            //      [auth] unless the service is read-only (01,02,03,05,06,07,09,0A)
+	CMD_DIAG_REQUEST = 0x10,    // req: proto_diag_request_t, then 1-7 request bytes (1-6 with
+	                            //      DIAG_FLAG_EXT_ADDR)    rsp: diagnostic records (see below)
+	                            //      services: see the allow-list in docs/protocol.md
 	CMD_GET_VIN = 0x11,         // req: -                  rsp: 17 ASCII characters
 	CMD_LIVE_START = 0x12,      // req: u16 interval_ms, 1-32 mode 01 PIDs    rsp: -
 	CMD_LIVE_STOP = 0x13,       // req: -                  rsp: -
@@ -86,18 +85,40 @@ typedef enum
 	ERR_NOT_AUTHORIZED = 0x05,  // needs an authenticated link (USB, or bonded BLE); BLE pairing has been requested
 	ERR_CAN = 0x06,             // CAN bus not available (bus-off, TX failure)
 	ERR_UNAVAILABLE = 0x07,     // feature not available (e.g. BLE module missing)
+	ERR_NOT_PERMITTED = 0x08,   // diagnostic service or CAN ID the device never sends
 } proto_err_t;
 // ERR payload: [code u8]
 
 /*
- * CAN IDs (OBD request dest, OBD record ecu_id) are u32; bit 31 marks a 29-bit
- * ID, as in Linux SocketCAN: 0x7E8 is 11-bit, 0x98DAF110 is 29-bit 0x18DAF110.
+ * CAN IDs are u32; bit 31 marks a 29-bit ID, as in Linux SocketCAN: 0x7E8 is
+ * 11-bit, 0x98DAF110 is 29-bit 0x18DAF110.
  *
- * OBD records (CMD_OBD_REQUEST response): one record per answering ECU,
- *   [ecu_id u32 LE][len u8][response message, len bytes]
+ * CMD_DIAG_REQUEST: the request is sent as one ISO-TP single frame to tx_id;
+ * answers are taken from IDs matching rx_id on the bits in rx_mask (0 = all
+ * ID bits). With DIAG_FLAG_AUTO, the vehicle's OBD broadcast is used instead
+ * (0x7DF or 0x18DB33F1, see obd_addressing) and tx_id, rx_id, rx_mask must be 0.
+ *
+ * Diagnostic records (CMD_DIAG_REQUEST response): one per answering ECU,
+ *   [ecu_id u32 LE][len u16 LE][response message, len bytes]
  * The message starts with the response service ID (request SID + 0x40), or
  * 0x7F <SID> <NRC> for a negative response.
  */
+
+#define DIAG_FLAG_AUTO       0x01   // the vehicle's OBD broadcast; implies DIAG_FLAG_FUNCTIONAL
+#define DIAG_FLAG_FUNCTIONAL 0x02   // several ECUs may answer: collect them until the timeout
+#define DIAG_FLAG_EXT_ADDR   0x04   // extended addressing: tx_ext / rx_ext before the PCI in every frame
+
+typedef struct __attribute__((packed))
+{
+	uint8_t flags;              // DIAG_FLAG_*
+	uint32_t tx_id;
+	uint32_t rx_id;
+	uint32_t rx_mask;
+	uint8_t tx_ext;
+	uint8_t rx_ext;
+	uint8_t pad;                // padding byte of the frames the device sends
+	uint16_t timeout_ms;        // 0 = 50 ms; at most 5000
+} proto_diag_request_t;         // followed by the request bytes
 
 typedef struct __attribute__((packed))
 {

@@ -10,8 +10,8 @@ from typing import Callable, Iterable, Protocol
 from .framing import Frame, FrameDecoder, encode_frame
 from .pids import pids_from_bitmap
 from .protocol import (
-    OBD_ID_BROADCAST, CanStats, CanState, Cmd, Err, Evt, FrameType, Info, ObdResponse, Power, Topic,
-    parse_live_records, parse_obd_records,
+    OBD_BROADCAST, CanStats, CanState, Cmd, DiagResponse, DiagTarget, Err, Evt, FrameType, Info, Power, Topic,
+    parse_diag_records, parse_live_records,
 )
 
 DEFAULT_TIMEOUT = 2.0
@@ -132,40 +132,21 @@ class Device:
     async def ble_clear_bonds(self) -> None:
         await self.request(Cmd.BLE_CLEAR_BONDS)
 
-    async def obd_request(self, data: bytes, dest: int = OBD_ID_BROADCAST, timeout: float = 7.0) -> list[ObdResponse]:
-        """Sends a raw OBD request (service ID + parameters, 1-7 bytes); returns every ECU's answer.
+    async def diag_request(self, data: bytes, target: DiagTarget = OBD_BROADCAST,
+                           timeout: float = 7.0) -> list[DiagResponse]:
+        """Sends a diagnostic request (service ID + parameters, 1-7 bytes, 1-6 with extended
+        addressing) as one ISO-TP single frame; returns every answer that belongs to it.
 
         The default timeout allows for ECUs that answer "response pending" (up to 5 s)."""
-        payload = struct.pack("<I", dest) + bytes(data)
-        return parse_obd_records(await self.request(Cmd.OBD_REQUEST, payload, timeout))
+        payload = target.pack() + bytes(data)
+        return parse_diag_records(await self.request(Cmd.DIAG_REQUEST, payload, timeout))
 
     async def get_vin(self) -> str:
         return (await self.request(Cmd.GET_VIN, timeout=7.0)).decode("ascii", "replace")
 
     async def get_supported_pids(self) -> list[int]:
         """Mode 01 PIDs the vehicle supports, sorted, including the range PIDs 0x20, 0x40, ..."""
-        try:
-            return pids_from_bitmap(await self.request(Cmd.GET_SUPPORTED_PIDS, timeout=7.0))
-        except DeviceError as e:
-            if e.code != Err.UNKNOWN_CMD:
-                raise
-
-        # firmware before 0.3.0: ask the ECUs for PIDs 0x00, 0x20, ... directly
-        bitmap = bytearray(32)
-        for start in range(0x00, 0xE1, 0x20):
-            try:
-                responses = await self.obd_request(bytes([0x01, start]))
-            except DeviceError as e:
-                if start == 0x00 or e.code != Err.TIMEOUT:
-                    raise
-                break
-            for r in responses:
-                if len(r.message) >= 6 and r.message[0] == 0x41 and r.message[1] == start:
-                    for i in range(4):
-                        bitmap[start // 8 + i] |= r.message[2 + i]
-            if not bitmap[start // 8 + 3] & 0x01:
-                break
-        return pids_from_bitmap(bytes(bitmap))
+        return pids_from_bitmap(await self.request(Cmd.GET_SUPPORTED_PIDS, timeout=7.0))
 
     async def live_start(self, pids: Iterable[int], interval_ms: int = 500) -> None:
         """Starts live polling of mode 01 PIDs; results arrive via on_live_data().

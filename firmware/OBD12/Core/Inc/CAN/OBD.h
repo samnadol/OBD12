@@ -1,19 +1,20 @@
 /*
  * OBD.h
  *
- * OBD-II (SAE J1979 over ISO 15765-4) request engine. Requests are queued and
- * sent one at a time; responses from every ECU that answers within the
- * response window are collected and handed back as a list of records:
+ * Diagnostic request engine (SAE J1979 OBD-II, and manufacturer services such
+ * as UDS / KWP2000 over ISO 15765). Requests are queued and sent one at a
+ * time. Each request says where it goes and where answers come from (an
+ * obd_request_t); the answers are handed back as a list of records:
  *
- *   record = [ecu_id u32 LE][len u8][response message, len bytes]
+ *   record = [ecu_id u32 LE][len u16 LE][response message, len bytes]
  *
  * where ecu_id is the CAN ID the ECU answered on (CAN_ID_EXT set for 29-bit
  * IDs) and the response message starts with the response service ID
- * (e.g. 0x41 ...) or 0x7F for a negative response.
+ * (request SID + 0x40) or 0x7F for a negative response.
  *
- * OBD_ID_BROADCAST stands for the vehicle's OBD functional address: 0x7DF on
+ * OBD_FLAG_AUTO stands for the vehicle's OBD functional address: 0x7DF on
  * 11-bit vehicles, 0x18DB33F1 on 29-bit ones. Until a vehicle has answered,
- * a broadcast nobody answers on 0x7DF is sent again on 0x18DB33F1 (ISO
+ * an AUTO request nobody answers on 0x7DF is sent again on 0x18DB33F1 (ISO
  * 15765-4 initialisation); the first answer decides the addressing, which is
  * then kept while powered.
  */
@@ -24,14 +25,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define OBD_ID_BROADCAST 0x7DF
-#define OBD_ID_ENGINE    0x7E0
+#include "Comms/protocol.h"
 
-#define OBD_RECORD_HEADER 5     // ecu_id u32, len u8
+#define OBD_RECORD_HEADER 6     // ecu_id u32, len u16
 
-#define OBD_RESPONSE_WINDOW_MS   50     // P2_CAN, ISO 15765-4
-#define OBD_RESPONSE_PENDING_MS  5000   // P2*_CAN, after NRC 0x78
-#define OBD_RESULT_MAX           236    // bytes of records per request
+#define OBD_RESPONSE_WINDOW_MS   50     // P2_CAN, ISO 15765-4: default timeout
+#define OBD_RESPONSE_PENDING_MS  5000   // P2*_CAN, after NRC 0x78; also the longest timeout
+#define OBD_RESULT_MAX           PROTO_MAX_PAYLOAD   // bytes of records per request
+#define OBD_LIVE_RESULT_MAX      236
 #define OBD_LIVE_MAX_PIDS        32
 
 // supported mode 01 PIDs, as the concatenated answers to PIDs 0x00, 0x20, ... 0xE0:
@@ -91,11 +92,24 @@ typedef enum
 	OBD_KIND_PIDS = 4,          // internal: supported PID discovery
 } obd_kind_t;
 
+// obd_request_t.flags (same values as the host protocol's DIAG_REQUEST)
+#define OBD_FLAG_AUTO       0x01    // the vehicle's OBD broadcast; tx_id, rx_id, rx_mask are not used
+#define OBD_FLAG_FUNCTIONAL 0x02    // several ECUs may answer: collect until the timeout
+#define OBD_FLAG_EXT_ADDR   0x04    // extended addressing: tx_ext / rx_ext before the PCI
+#define OBD_FLAGS_ALL       0x07
+
 typedef struct
 {
-	uint32_t dest;              // OBD_ID_BROADCAST, or an ISO 15765-4 request ID (see ISOTP.h)
-	uint8_t len;                // request length, 1-7
-	uint8_t data[7];            // service ID, PID(s)
+	uint8_t flags;              // OBD_FLAG_*
+	uint32_t tx_id;             // CAN ID the request goes to (CAN_ID_EXT for 29-bit)
+	uint32_t rx_id;             // answers come from IDs matching rx_id ...
+	uint32_t rx_mask;           // ... on these bits
+	uint8_t tx_ext;             // extended addressing: address byte we send
+	uint8_t rx_ext;             // extended addressing: address byte answers carry
+	uint8_t pad;                // padding byte
+	uint16_t timeout_ms;        // physical: wait for the answer; functional: collect answers; 0 = default
+	uint8_t len;                // request length, 1-7 (1-6 with extended addressing)
+	uint8_t data[7];            // service ID and parameters
 	uint8_t kind;               // obd_kind_t
 	uint8_t transport;          // which host asked (OBD_KIND_HOST*)
 	uint8_t seq;                // host request sequence number
@@ -104,8 +118,13 @@ typedef struct
 void OBD_Init(void);
 void OBD_Process(void);
 
-// false if the queue is full
+// false if the queue is full or the request is malformed
 bool OBD_Submit(const obd_request_t *req);
+
+// sets up `req` as a request to the vehicle's OBD broadcast (OBD_FLAG_AUTO)
+void OBD_SetBroadcast(obd_request_t *req);
+// sets up `req` as a request to the ECU that answers on `response_id` (ISO 15765-4)
+void OBD_SetPhysical(obd_request_t *req, uint32_t response_id);
 
 obd_addressing_t OBD_GetAddressing(void);
 

@@ -86,6 +86,7 @@ function errorText(e) {
 			case Err.CAN: return "Can't reach the vehicle. Is the ignition on?";
 			case Err.BUSY: return "The adapter is busy. Try again.";
 			case Err.UNAVAILABLE: return "This adapter doesn't support that.";
+			case Err.NOT_PERMITTED: return "The adapter doesn't send that kind of request.";
 		}
 	}
 	return e?.message || String(e);
@@ -820,7 +821,7 @@ async function readCodes(session) {
 	for (const [service, kind] of [[0x03, "stored"], [0x07, "pending"]]) {
 		let responses;
 		try {
-			responses = await session.obdRequest(Uint8Array.of(service));
+			responses = await session.diagRequest(Uint8Array.of(service));
 		} catch (e) {
 			// some vehicles don't answer for pending codes
 			if (service !== 0x03 && e instanceof DeviceError && e.code === Err.TIMEOUT)

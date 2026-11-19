@@ -11,17 +11,19 @@ Work planned from the "OEM diagnostics and OTA firmware updates" report (Nov 202
 
 - [x] Enable extended (29-bit) receive filters (`0x18DAF1xx`, `ExtFiltersNbr=1`)
 - [x] 29-bit ISO-TP: normal-fixed addressing (`0x18DAxxF1` / `0x18DAF1xx`), functional `0x18DB33F1`, flow control to `0x18DAxxF1`; protocol v3 carries u32 CAN IDs
-- [ ] Accept GM Global B responses on `0x142AF1xx` (requests `0x14DAxxF1`, priority `0x14`)
+- [x] Accept GM Global B responses on `0x142AF1xx` (requests `0x14DAxxF1`, priority `0x14`): a `DIAG_REQUEST` with `rx_id` `0x142AF1xx`
 - [x] Addressing detection at 500k: an unanswered `0x7DF` broadcast is resent on `0x18DB33F1` until a vehicle answers; kept while powered, reported in `GET_INFO`
 - [ ] 250 kbit/s detection; record every responder; cache the result per VIN instead of per power-up
 - [ ] Listen-only bit-rate probe before transmitting on an unknown bus
 - [ ] Check multi-responder bursts (e.g. Honda's ~15 modules on `18DBEFF1`) against the 3-element RX FIFO on a real car; the RX interrupt already drains the FIFO
-- [ ] Generic request descriptor: `{29-bit flag, tx_id, rx_id or mask, ext_addr_tx, ext_addr_rx, fc_mode, timeout_ms, pad_byte}`, matching OBDb's `hdr/rax/eax/tst/pri/tmo/fcm1`; never assume rx = tx + 8
-- [ ] Extended addressing (Toyota `0x750/0x758`): target byte on every frame including our flow control, filter on ID + target byte, 6-byte single frames, one target at a time
+- [x] Generic request descriptor: `DIAG_REQUEST` (protocol v4) replaces `OBD_REQUEST`: `{flags, tx_id, rx_id, rx_mask, tx_ext, rx_ext, pad, timeout_ms}`, matching OBDb's `hdr/rax/eax/tmo`; a spare FDCAN filter per ID type follows `rx_id`/`rx_mask`
+- [x] Extended addressing (Toyota `0x750/0x758`): target byte on every frame including our flow control, filter on ID + target byte, 6-byte single frames, one target at a time
 - [x] NRC 0x78 (response pending): extend the wait to ~5 s in firmware
-- [ ] Reassembly buffers ≥ 256 B (Honda block DIDs exceed 160 B)
-- [ ] Per-request timeouts (≥ 600 ms for Toyota `0x750` targets) and padding (0x00 default; 0x55/0xAA seen)
-- [ ] Read-only service allow-list: allow J1979 0x01–0x0A, `0x10` (01/03 only), `0x19`, `0x1A`, `0x21`, `0x22`, `0x3E`, GMLAN `$A9`/`$AA`; DTC clear (`0x14`, `0x04`) only behind explicit user confirmation; block `0x27`, `0x29`, `0x2E`, `0x2F`, `0x31`, `0x34–0x37`, `0x3D`, `0x11`, `0x28`
+- [x] Reassembly buffers ≥ 256 B (Honda block DIDs exceed 160 B); records carry a u16 length, protocol payload up to 512 B
+- [x] Per-request timeouts (≥ 600 ms for Toyota `0x750` targets) and padding (0x00 default; 0x55/0xAA seen)
+- [x] Read-only service allow-list: J1979 reads, `0x10` (01/03 only), `0x19`, `0x1A`, `0x21`, `0x22`, `0x3E`, GMLAN `$A9`/`$AA`; DTC clear (`0x04`, `0x14`) and J1979 `0x08` on authorized links only; everything else `ERR_NOT_PERMITTED`. `tx_id` limited to diagnostic IDs (11-bit `0x600–0x7FF`, GMLAN `0x101`/`0x240–0x25F`, 29-bit PF `0xDA`/`0xDB`)
+- [ ] Apps: ask for explicit confirmation before sending a DTC clear
+- [ ] Multi-frame requests (UDS `0x22` with several DIDs, GMLAN `$AA` with many DPIDs exceed 7 bytes)
 - [ ] GM UUDT raw-frame sink for `$A9` DTC reports and `$AA` periodic data (single frames without ISO-TP PCI on `0x541–0x55F` / `0x5E8–0x5EF`); background `$3E` while streaming (2–3 d)
 - [ ] Optional: OVMS-style firmware poll scheduler (app pushes `{tx, rx, eax, service, id, interval}`; ~2.5 KB RAM for 210 commands)
 

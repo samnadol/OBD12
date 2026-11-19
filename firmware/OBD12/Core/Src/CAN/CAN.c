@@ -21,6 +21,10 @@
 #define CAN_RX_RING_SIZE 32
 #define BUS_OFF_RECOVERY_INTERVAL_MS 1000
 
+// filter list indices (StdFiltersNbr and ExtFiltersNbr are 2)
+#define FILTER_FIXED    0       // OBD-II responses, set once
+#define FILTER_RESPONSE 1       // CAN_SetResponseFilter()
+
 static FDCAN_HandleTypeDef *can_handle;
 
 static can_frame_t rx_storage[CAN_RX_RING_SIZE];
@@ -103,7 +107,7 @@ void CAN_Config(FDCAN_HandleTypeDef *hfdcan)
 	// accept only the OBD-II ECU response IDs, reject everything else in hardware
 	FDCAN_FilterTypeDef filter = { 0 };
 	filter.IdType = FDCAN_STANDARD_ID;
-	filter.FilterIndex = 0;
+	filter.FilterIndex = FILTER_FIXED;
 	filter.FilterType = FDCAN_FILTER_RANGE;
 	filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
 	filter.FilterID1 = CAN_ID_RESPONSE_FIRST;
@@ -112,15 +116,17 @@ void CAN_Config(FDCAN_HandleTypeDef *hfdcan)
 	if (HAL_FDCAN_ConfigFilter(hfdcan, &filter) != HAL_OK)
 		Error_Handler();
 
-	// 29-bit: the extended filter list has its own indices (ExtFiltersNbr >= 1)
+	// 29-bit: the extended filter list has its own indices
 	filter.IdType = FDCAN_EXTENDED_ID;
-	filter.FilterIndex = 0;
+	filter.FilterIndex = FILTER_FIXED;
 	filter.FilterType = FDCAN_FILTER_MASK;
 	filter.FilterID1 = CAN_ID_RESPONSE_29 & CAN_ID_EXT_MASK;
 	filter.FilterID2 = CAN_ID_RESPONSE_29_MASK;
 
 	if (HAL_FDCAN_ConfigFilter(hfdcan, &filter) != HAL_OK)
 		Error_Handler();
+
+	CAN_ClearResponseFilter();
 
 	if (HAL_FDCAN_ConfigGlobalFilter(hfdcan, FDCAN_REJECT, FDCAN_REJECT, FDCAN_REJECT_REMOTE, FDCAN_REJECT_REMOTE) != HAL_OK)
 		Error_Handler();
@@ -203,6 +209,38 @@ bool CAN_Tx(uint32_t id, const uint8_t data[8])
 
 	stats.tx_frames++;
 	return true;
+}
+
+static void config_response_filter(uint32_t id_type, uint32_t config, uint32_t id, uint32_t mask)
+{
+	FDCAN_FilterTypeDef filter = { 0 };
+	filter.IdType = id_type;
+	filter.FilterIndex = FILTER_RESPONSE;
+	filter.FilterType = FDCAN_FILTER_MASK;
+	filter.FilterConfig = config;
+	filter.FilterID1 = id;
+	filter.FilterID2 = mask;
+	HAL_FDCAN_ConfigFilter(can_handle, &filter); // allowed while the controller runs
+}
+
+void CAN_SetResponseFilter(uint32_t id, uint32_t mask)
+{
+	if (id & CAN_ID_EXT)
+	{
+		config_response_filter(FDCAN_STANDARD_ID, FDCAN_FILTER_DISABLE, 0, 0);
+		config_response_filter(FDCAN_EXTENDED_ID, FDCAN_FILTER_TO_RXFIFO0, id & CAN_ID_EXT_MASK, mask & CAN_ID_EXT_MASK);
+	}
+	else
+	{
+		config_response_filter(FDCAN_EXTENDED_ID, FDCAN_FILTER_DISABLE, 0, 0);
+		config_response_filter(FDCAN_STANDARD_ID, FDCAN_FILTER_TO_RXFIFO0, id & 0x7FFu, mask & 0x7FFu);
+	}
+}
+
+void CAN_ClearResponseFilter(void)
+{
+	config_response_filter(FDCAN_STANDARD_ID, FDCAN_FILTER_DISABLE, 0, 0);
+	config_response_filter(FDCAN_EXTENDED_ID, FDCAN_FILTER_DISABLE, 0, 0);
 }
 
 void CAN_AbortPendingTx(void)

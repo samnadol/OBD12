@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 
-PROTO_VERSION = 3
+PROTO_VERSION = 4
 
 
 class FrameType(IntEnum):
@@ -27,7 +27,7 @@ class Cmd(IntEnum):
     GET_CAN_STATS = 0x05
     RESET = 0x06
     BLE_CLEAR_BONDS = 0x07
-    OBD_REQUEST = 0x10
+    DIAG_REQUEST = 0x10
     GET_VIN = 0x11
     LIVE_START = 0x12
     LIVE_STOP = 0x13
@@ -55,6 +55,7 @@ class Err(IntEnum):
     NOT_AUTHORIZED = 0x05
     CAN = 0x06
     UNAVAILABLE = 0x07
+    NOT_PERMITTED = 0x08   # diagnostic service or CAN ID the device never sends
 
 
 class ResetCause(IntEnum):
@@ -117,11 +118,58 @@ class InfoFlag(IntFlag):
 CAN_ID_EXT = 0x80000000
 CAN_ID_EXT_MASK = 0x1FFFFFFF
 
+OBD_NEGATIVE_RESPONSE = 0x7F
+
+
+class DiagFlag(IntFlag):
+    AUTO = 0x01         # the vehicle's OBD broadcast (0x7DF or 0x18DB33F1); IDs must be 0
+    FUNCTIONAL = 0x02   # several ECUs may answer: collect them until the timeout
+    EXT_ADDR = 0x04     # extended addressing: tx_ext / rx_ext before the PCI in every frame
+
+
+def id_bits(can_id: int) -> int:
+    return CAN_ID_EXT_MASK if can_id & CAN_ID_EXT else 0x7FF
+
+
+def response_id_for(request_id: int) -> int:
+    """ISO 15765-4: 0x7E0 -> 0x7E8, 0x98DA10F1 -> 0x98DAF110."""
+    if request_id & CAN_ID_EXT:
+        return (request_id & 0xFFFF0000) | ((request_id & 0xFF) << 8) | ((request_id >> 8) & 0xFF)
+    return request_id + 8
+
+
+@dataclass(frozen=True)
+class DiagTarget:
+    """Where a DIAG_REQUEST goes and which answers belong to it."""
+    tx_id: int = 0
+    rx_id: int = 0
+    rx_mask: int = 0            # bits of rx_id that must match; 0 = all (one ECU)
+    flags: DiagFlag = DiagFlag(0)
+    tx_ext: int = 0             # with DiagFlag.EXT_ADDR: address byte sent
+    rx_ext: int = 0             # with DiagFlag.EXT_ADDR: address byte of the answers
+    pad: int = 0x00
+    timeout_ms: int = 0         # 0 = 50 ms, at most 5000
+
+    _FORMAT = "<BIIIBBBH"
+
+    def pack(self) -> bytes:
+        return struct.pack(self._FORMAT, int(self.flags), self.tx_id, self.rx_id, self.rx_mask,
+                           self.tx_ext, self.rx_ext, self.pad, self.timeout_ms)
+
+    @classmethod
+    def iso15765(cls, tx_id: int, **kwargs) -> "DiagTarget":
+        """ISO 15765-4 addressing: 0x7DF / 0x98DB33F1 reach every OBD ECU; 0x7E0-0x7E7 and
+        0x98DAxxF1 reach one, which answers on the matching response ID."""
+        if tx_id == 0x7DF:
+            return cls(tx_id, 0x7E8, 0x7F8, DiagFlag.FUNCTIONAL, **kwargs)
+        if tx_id == CAN_ID_EXT | 0x18DB33F1:
+            return cls(tx_id, CAN_ID_EXT | 0x18DAF100, 0x1FFFFF00, DiagFlag.FUNCTIONAL, **kwargs)
+        return cls(tx_id, response_id_for(tx_id), **kwargs)
+
+
 # the vehicle's OBD broadcast: the device sends it on 0x7DF or 0x18DB33F1,
 # whichever addressing the vehicle uses (Info.obd_addressing)
-OBD_ID_BROADCAST = 0x7DF
-OBD_ID_ENGINE = 0x7E0
-OBD_NEGATIVE_RESPONSE = 0x7F
+OBD_BROADCAST = DiagTarget(flags=DiagFlag.AUTO)
 
 
 def _enum_or_int(enum_type, value):
@@ -195,8 +243,8 @@ class CanStats:
 
 
 @dataclass(frozen=True)
-class ObdResponse:
-    """One ECU's answer to an OBD request."""
+class DiagResponse:
+    """One ECU's answer to a diagnostic request."""
     ecu_id: int         # the CAN ID it answered on (CAN_ID_EXT set for 29-bit)
     message: bytes      # starts with the response SID (request SID + 0x40), or 0x7F SID NRC
 
@@ -209,13 +257,14 @@ class ObdResponse:
         return self.message[2] if self.negative else None
 
 
-def parse_obd_records(payload: bytes) -> list[ObdResponse]:
+def parse_diag_records(payload: bytes) -> list[DiagResponse]:
+    """DIAG_REQUEST response: [ecu_id u32][len u16][message] per answering ECU."""
     responses = []
     pos = 0
-    while pos + 5 <= len(payload):
-        ecu_id, length = struct.unpack_from("<IB", payload, pos)
-        responses.append(ObdResponse(ecu_id, payload[pos + 5:pos + 5 + length]))
-        pos += 5 + length
+    while pos + 6 <= len(payload):
+        ecu_id, length = struct.unpack_from("<IH", payload, pos)
+        responses.append(DiagResponse(ecu_id, payload[pos + 6:pos + 6 + length]))
+        pos += 6 + length
     return responses
 
 

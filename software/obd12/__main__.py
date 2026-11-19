@@ -8,7 +8,9 @@ import sys
 
 from . import pids
 from .client import Device, DeviceError
-from .protocol import InfoFlag, Topic, format_can_id, parse_can_id
+from dataclasses import replace
+
+from .protocol import OBD_BROADCAST, DiagFlag, DiagTarget, InfoFlag, Topic, format_can_id, parse_can_id
 from .transports import BleTransport, UsbTransport
 
 DEFAULT_LIVE_PIDS = "0C,0D,05,0F,11"
@@ -63,9 +65,27 @@ async def cmd_vin(dev: Device, args) -> None:
     print(await dev.get_vin())
 
 
+def diag_target(args) -> DiagTarget:
+    if args.dest is None:
+        if args.rx or args.ext or args.functional:
+            raise SystemExit("--rx, --ext and --functional need --dest")
+        return replace(OBD_BROADCAST, pad=int(args.pad, 16), timeout_ms=args.timeout)
+
+    target = DiagTarget.iso15765(parse_can_id(args.dest), pad=int(args.pad, 16), timeout_ms=args.timeout)
+    if args.rx:
+        target = replace(target, rx_id=parse_can_id(args.rx), rx_mask=int(args.rx_mask, 16))
+    if args.functional:
+        target = replace(target, flags=target.flags | DiagFlag.FUNCTIONAL)
+    if args.ext:
+        tx_ext, _, rx_ext = args.ext.partition(":")
+        target = replace(target, flags=target.flags | DiagFlag.EXT_ADDR,
+                         tx_ext=int(tx_ext, 16), rx_ext=int(rx_ext or tx_ext, 16))
+    return target
+
+
 async def cmd_obd(dev: Device, args) -> None:
     data = bytes(parse_hex_list(args.request))
-    for r in await dev.obd_request(data, dest=parse_can_id(args.dest)):
+    for r in await dev.diag_request(data, diag_target(args)):
         status = f"negative, NRC 0x{r.nrc:02X}" if r.negative else "ok"
         print(f"{format_can_id(r.ecu_id)}: {r.message.hex(' ').upper()}  ({status})")
 
@@ -138,7 +158,7 @@ COMMANDS = {
     "can-stats": (cmd_can_stats, "CAN controller counters"),
     "vin": (cmd_vin, "vehicle identification number"),
     "pids": (cmd_pids, "mode 01 PIDs the vehicle supports"),
-    "obd": (cmd_obd, "raw OBD request, e.g. 'obd 01,0C'"),
+    "obd": (cmd_obd, "raw diagnostic request, e.g. 'obd 01,0C' or 'obd 22,F1,90 --dest 7E0'"),
     "live": (cmd_live, "stream live data until Ctrl+C"),
     "log": (cmd_log, "show device log output until Ctrl+C"),
     "ping": (cmd_ping, "round-trip time"),
@@ -159,9 +179,22 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name, help=help_text)
         if name == "obd":
             p.add_argument("request", help="request bytes in hex, e.g. 01,0C")
-            p.add_argument("--dest", default="7DF",
-                           help="destination CAN ID in hex: 7DF (default) is the vehicle's OBD broadcast, 11- or 29-bit; "
-                                "7E0-7E7, or 29-bit 18DB33F1 / 18DAxxF1")
+            p.add_argument("--dest", metavar="ID",
+                           help="CAN ID in hex to send on (IDs above 7FF are 29-bit). Without it, the request goes "
+                                "to the vehicle's OBD broadcast (7DF or 18DB33F1). 7DF and 18DB33F1 collect every "
+                                "OBD ECU's answer; other IDs expect one ECU on the ISO 15765-4 response ID "
+                                "(7E0 -> 7E8, 18DA10F1 -> 18DAF110) unless --rx says otherwise")
+            p.add_argument("--rx", metavar="ID", help="CAN ID in hex the answers come from, e.g. 758 or 142AF140")
+            p.add_argument("--rx-mask", default="0", metavar="MASK",
+                           help="with --rx: ID bits that must match, in hex (default: all)")
+            p.add_argument("--functional", action="store_true",
+                           help="several ECUs may answer: collect them all until the timeout")
+            p.add_argument("--ext", metavar="TX[:RX]",
+                           help="extended addressing: address byte to send and to expect in answers, in hex "
+                                "(e.g. 40 for a Toyota module on 750)")
+            p.add_argument("--pad", default="00", help="padding byte in hex (default 00)")
+            p.add_argument("--timeout", type=int, default=0, metavar="MS",
+                           help="answer timeout in ms, at most 5000 (default 50)")
         elif name == "live":
             p.add_argument("--pids", default=DEFAULT_LIVE_PIDS,
                            help=f"mode 01 PIDs in hex, or 'supported' for all the vehicle supports (default {DEFAULT_LIVE_PIDS})")
