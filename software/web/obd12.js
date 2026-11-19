@@ -52,6 +52,11 @@ export const RESET_CAUSES = ["unknown", "power-on", "reset pin", "software", "wa
 export const FAULTS = ["none", "Error_Handler", "HardFault", "MemManage", "BusFault", "UsageFault", "NMI"];
 export const CAN_STATES = ["OK", "error warning", "error passive", "bus-off", "not started"];
 
+// CAN IDs are u32; bit 31 marks a 29-bit ID (as in Linux SocketCAN)
+export const CAN_ID_EXT = 0x80000000;
+
+// the vehicle's OBD broadcast: the device sends it on 0x7DF or 0x18DB33F1,
+// whichever addressing the vehicle uses (info.obdAddressing: 0 unknown, 1 11-bit, 2 29-bit)
 export const OBD_ID_BROADCAST = 0x7DF;
 export const OBD_NEGATIVE_RESPONSE = 0x7F;
 
@@ -214,6 +219,7 @@ export function parseInfo(p) {
 		uid: [v.getUint32(12, true), v.getUint32(16, true), v.getUint32(20, true)],
 		bleMac: toHex(p.subarray(24, 30), ":"),
 		flags: p[30],
+		obdAddressing: p[31],
 		blePasskey: v.getUint32(32, true),
 	};
 }
@@ -234,16 +240,17 @@ export function parseCanStats(p) {
 	return Object.fromEntries(CAN_STATS_FIELDS.map((name, i) => [name, v.getUint32(i * 4, true)]));
 }
 
-// one record per answering ECU: { ecuId, message, negative, nrc }
+// one record per answering ECU: { ecuId, message, negative, nrc }; ecuId has CAN_ID_EXT set for 29-bit
 export function parseObdRecords(p) {
+	const v = view(p);
 	const responses = [];
 	let pos = 0;
-	while (pos + 3 <= p.length) {
-		const len = p[pos + 2];
-		const message = p.slice(pos + 3, pos + 3 + len);
+	while (pos + 5 <= p.length) {
+		const len = p[pos + 4];
+		const message = p.slice(pos + 5, pos + 5 + len);
 		const negative = message.length >= 3 && message[0] === OBD_NEGATIVE_RESPONSE;
-		responses.push({ ecuId: p[pos] | (p[pos + 1] << 8), message, negative, nrc: negative ? message[2] : null });
-		pos += 3 + len;
+		responses.push({ ecuId: v.getUint32(pos, true), message, negative, nrc: negative ? message[2] : null });
+		pos += 5 + len;
 	}
 	return responses;
 }
@@ -418,9 +425,9 @@ export class Device {
 
 	// raw OBD request (service ID + parameters, 1-7 bytes); resolves with every ECU's answer
 	async obdRequest(data, dest = OBD_ID_BROADCAST, timeoutMs = OBD_TIMEOUT_MS) {
-		const payload = new Uint8Array(2 + data.length);
-		view(payload).setUint16(0, dest, true);
-		payload.set(data, 2);
+		const payload = new Uint8Array(4 + data.length);
+		view(payload).setUint32(0, dest, true);
+		payload.set(data, 4);
 		return parseObdRecords(await this.request(Cmd.OBD_REQUEST, payload, timeoutMs));
 	}
 

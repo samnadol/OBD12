@@ -136,7 +136,7 @@ class Device:
         """Sends a raw OBD request (service ID + parameters, 1-7 bytes); returns every ECU's answer.
 
         The default timeout allows for ECUs that answer "response pending" (up to 5 s)."""
-        payload = struct.pack("<H", dest) + bytes(data)
+        payload = struct.pack("<I", dest) + bytes(data)
         return parse_obd_records(await self.request(Cmd.OBD_REQUEST, payload, timeout))
 
     async def get_vin(self) -> str:

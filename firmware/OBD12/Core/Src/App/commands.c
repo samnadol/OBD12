@@ -15,6 +15,7 @@
 #include "BLE/App.h"
 #include "BLE/BLE_Device.h"
 #include "CAN/CAN.h"
+#include "CAN/ISOTP.h"
 #include "CAN/OBD.h"
 #include "Comms/comms.h"
 
@@ -52,6 +53,16 @@ static bool obd_service_is_read_only(uint8_t sid)
 	}
 }
 
+// the OBD broadcast, or an ISO 15765-4 functional or physical request ID
+static bool obd_dest_valid(uint32_t dest)
+{
+	if (dest == OBD_ID_BROADCAST || dest == ISOTP_ID_FUNCTIONAL_29)
+		return true;
+	if (dest >= OBD_ID_ENGINE && dest <= OBD_ID_ENGINE + 7)
+		return true;
+	return (dest & ~0xFF00u) == ISOTP_ID_REQUEST_29;
+}
+
 static bool require_auth(transport_id_t t, uint8_t seq, uint8_t id)
 {
 	if (comms_authorized(t))
@@ -86,6 +97,7 @@ static void handle_get_info(transport_id_t t, uint8_t seq)
 	info.last_fault = system_last_fault();
 	info.last_fault_info = system_last_fault_info();
 	info.can_state = CAN_GetState();
+	info.obd_addressing = OBD_GetAddressing();
 
 	// the passkey is derived from the UID, so neither leaves the device over an
 	// unauthenticated link
@@ -117,20 +129,20 @@ static void handle_get_info(transport_id_t t, uint8_t seq)
 
 static void handle_obd_request(transport_id_t t, uint8_t seq, const uint8_t *p, uint16_t len)
 {
-	if (len < 3 || len > 9)
+	if (len < 5 || len > 11)
 	{
 		comms_error(t, seq, CMD_OBD_REQUEST, ERR_BAD_REQUEST);
 		return;
 	}
 
-	uint16_t dest = p[0] | ((uint16_t) p[1] << 8);
-	if (dest != OBD_ID_BROADCAST && (dest < OBD_ID_ENGINE || dest > OBD_ID_ENGINE + 7))
+	uint32_t dest = p[0] | ((uint32_t) p[1] << 8) | ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
+	if (!obd_dest_valid(dest))
 	{
 		comms_error(t, seq, CMD_OBD_REQUEST, ERR_BAD_REQUEST);
 		return;
 	}
 
-	if (!obd_service_is_read_only(p[2]) && !require_auth(t, seq, CMD_OBD_REQUEST))
+	if (!obd_service_is_read_only(p[4]) && !require_auth(t, seq, CMD_OBD_REQUEST))
 		return;
 
 	if (!can_usable())
@@ -141,12 +153,12 @@ static void handle_obd_request(transport_id_t t, uint8_t seq, const uint8_t *p, 
 
 	obd_request_t req = {
 		.dest = dest,
-		.len = (uint8_t) (len - 2),
+		.len = (uint8_t) (len - 4),
 		.kind = OBD_KIND_HOST,
 		.transport = t,
 		.seq = seq,
 	};
-	memcpy(req.data, p + 2, req.len);
+	memcpy(req.data, p + 4, req.len);
 
 	if (!OBD_Submit(&req))
 		comms_error(t, seq, CMD_OBD_REQUEST, ERR_BUSY);

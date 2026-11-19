@@ -24,7 +24,7 @@
 
 #include <stdint.h>
 
-#define PROTO_VERSION 2
+#define PROTO_VERSION 3
 
 #define PROTO_HEADER_LEN   3
 #define PROTO_CRC_LEN      2
@@ -52,7 +52,9 @@ typedef enum
 	CMD_BLE_CLEAR_BONDS = 0x07, // req: -                  rsp: -                       [auth]
 
 	// vehicle
-	CMD_OBD_REQUEST = 0x10,     // req: u16 dest, 1-7 request bytes   rsp: OBD records (see below)
+	CMD_OBD_REQUEST = 0x10,     // req: u32 dest, 1-7 request bytes   rsp: OBD records (see below)
+	                            //      dest: 0x7DF = the vehicle's OBD broadcast (11- or 29-bit, see
+	                            //      obd_addressing), 0x7E0-0x7E7, 0x98DB33F1, 0x98DAxxF1
 	                            //      [auth] unless the service is read-only (01,02,03,05,06,07,09,0A)
 	CMD_GET_VIN = 0x11,         // req: -                  rsp: 17 ASCII characters
 	CMD_LIVE_START = 0x12,      // req: u16 interval_ms, 1-32 mode 01 PIDs    rsp: -
@@ -88,8 +90,11 @@ typedef enum
 // ERR payload: [code u8]
 
 /*
+ * CAN IDs (OBD request dest, OBD record ecu_id) are u32; bit 31 marks a 29-bit
+ * ID, as in Linux SocketCAN: 0x7E8 is 11-bit, 0x98DAF110 is 29-bit 0x18DAF110.
+ *
  * OBD records (CMD_OBD_REQUEST response): one record per answering ECU,
- *   [ecu_id u16 LE][len u8][response message, len bytes]
+ *   [ecu_id u32 LE][len u8][response message, len bytes]
  * The message starts with the response service ID (request SID + 0x40), or
  * 0x7F <SID> <NRC> for a negative response.
  */
@@ -108,7 +113,7 @@ typedef struct __attribute__((packed))
 	uint32_t uid[3];
 	uint8_t ble_mac[6];         // MSB first, as shown by phones
 	uint8_t flags;              // INFO_FLAG_*
-	uint8_t reserved;
+	uint8_t obd_addressing;     // 0 not known yet, 1 11-bit, 2 29-bit
 	uint32_t ble_passkey;       // only filled in over USB, 0 otherwise
 } proto_info_t;
 

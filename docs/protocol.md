@@ -1,4 +1,4 @@
-# OBD12 host protocol (version 2)
+# OBD12 host protocol (version 3)
 
 The same protocol runs over the USB serial port (115200 8N1) and the BLE Nordic UART service. The source of truth is `firmware/OBD12/Core/Inc/Comms/protocol.h` and `software/obd12/protocol.py` mirrors it.
 
@@ -55,7 +55,7 @@ Every REQ gets exactly one RSP or ERR with the same `seq` and `id`. Requests may
 | `0x05` | GET_CAN_STATS | – | 6 × `u32`: rx_frames, rx_dropped, tx_frames, tx_failed, bus_off_count, transceiver_faults | |
 | `0x06` | RESET | – | – (the device reboots after the answer) | yes |
 | `0x07` | BLE_CLEAR_BONDS | – | – | yes |
-| `0x10` | OBD_REQUEST | `dest u16`, 1–7 request bytes | OBD records | for services other than 01, 02, 03, 05, 06, 07, 09, 0A |
+| `0x10` | OBD_REQUEST | `dest u32`, 1–7 request bytes | OBD records | for services other than 01, 02, 03, 05, 06, 07, 09, 0A |
 | `0x11` | GET_VIN | – | 17 ASCII characters | |
 | `0x12` | LIVE_START | `interval_ms u16`, 1–32 mode 01 PIDs | – | |
 | `0x13` | LIVE_STOP | – | – | |
@@ -67,17 +67,27 @@ USB is always authorized. A BLE link is authorized once it is encrypted. Pairing
 
 ### OBD_REQUEST
 
-`dest` is `0x7DF` (functional broadcast) or `0x7E0`–`0x7E7` (one ECU). The request bytes are the OBD service ID followed by its parameters, e.g. `01 0C` for engine RPM. They are sent as one ISO-TP single frame.
+CAN IDs (`dest`, and the ECU ID in the records) are u32. Bit 31 marks a 29-bit ID, as in Linux SocketCAN: `0x000007E8` is 11-bit `7E8`, `0x98DAF110` is 29-bit `18DAF110`. Addressing follows ISO 15765-4 with the tester at `F1`.
+
+| `dest` | Meaning |
+|---|---|
+| `0x7DF` | the vehicle's OBD broadcast: `7DF` on 11-bit vehicles, `18DB33F1` on 29-bit ones |
+| `0x7E0`–`0x7E7` | one ECU, 11-bit; it answers on `dest + 8` |
+| `0x98DB33F1` | 29-bit broadcast |
+| `0x98DAxxF1` | one ECU (address `xx`), 29-bit; it answers on `18DAF1xx` |
+
+The request bytes are the OBD service ID followed by its parameters, e.g. `01 0C` for engine RPM. They are sent as one ISO-TP single frame.
 
 - **Broadcast:** the device collects every answer that arrives within 50 ms. The window stays open while a multi-frame answer is still arriving.
-- **Physical (one ECU):** the request completes at the first answer from `dest + 8`.
+- **Physical (one ECU):** the request completes at the first answer from that ECU.
 - **"Response pending" (NRC `0x78`):** extends the wait to 5 s.
+- **Addressing detection:** until a vehicle has answered, a `0x7DF` broadcast that gets no answer within 50 ms is sent again on `18DB33F1` (the ISO 15765-4 initialisation sequence). The first answer decides 11- or 29-bit, which `GET_INFO` reports, and the device keeps it for as long as it is powered.
 
 The response is a list of records, one per answering ECU:
 
 | Size | Field |
 |---|---|
-| 2 | ECU response ID (`0x7E8`–`0x7EF`) |
+| 4 | ECU ID: the CAN ID it answered on (`0x7E8`–`0x7EF`, or `0x98DAF1xx`) |
 | 1 | message length `n` |
 | n | response message: `SID + 0x40` followed by data, or `7F <SID> <NRC>` for a negative response |
 
@@ -133,7 +143,7 @@ Topics for `SET_EVENTS` are bit flags: `0x01` LOG, `0x02` POWER, `0x04` CAN_STAT
 
 | Offset | Type | Field |
 |---|---|---|
-| 0 | u8 | protocol version (1) |
+| 0 | u8 | protocol version (3) |
 | 1 | u8 × 3 | firmware version major, minor, patch |
 | 4 | u8 | HWCONF strap (bit 0 = HWCONF0) |
 | 5 | u8 | reset cause: 0 unknown, 1 power-on, 2 reset pin, 3 software, 4 watchdog, 5 window watchdog, 6 low-power, 7 fatal error |
@@ -143,7 +153,7 @@ Topics for `SET_EVENTS` are bit flags: `0x01` LOG, `0x02` POWER, `0x04` CAN_STAT
 | 12 | u32 × 3 | STM32 UID (zero on unauthorized links) |
 | 24 | u8 × 6 | BLE address, most significant byte first |
 | 30 | u8 | flags: `0x01` BLE available, `0x02` BLE connected, `0x04` this link is authorized, `0x08` VIN known, `0x10` supported PIDs known |
-| 31 | u8 | reserved |
+| 31 | u8 | OBD addressing: 0 not known yet, 1 11-bit, 2 29-bit |
 | 32 | u32 | BLE passkey (USB only, otherwise 0) |
 
 ### power (GET_POWER, EVT_POWER, BLE Power characteristic; 4 bytes)

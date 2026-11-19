@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 
-PROTO_VERSION = 2
+PROTO_VERSION = 3
 
 
 class FrameType(IntEnum):
@@ -86,6 +86,25 @@ class CanState(IntEnum):
     NOT_STARTED = 4
 
 
+class ObdAddressing(IntEnum):
+    UNKNOWN = 0     # no vehicle has answered yet
+    CAN_11BIT = 1
+    CAN_29BIT = 2
+
+
+def format_can_id(can_id: int) -> str:
+    """0x7E8 -> '7E8', 0x98DAF110 -> '18DAF110'."""
+    if can_id & CAN_ID_EXT:
+        return f"{can_id & CAN_ID_EXT_MASK:08X}"
+    return f"{can_id:03X}"
+
+
+def parse_can_id(text: str) -> int:
+    """'7DF' -> 0x7DF, '18DA10F1' -> 0x98DA10F1: IDs above 0x7FF are 29-bit."""
+    value = int(text, 16)
+    return value | CAN_ID_EXT if value > 0x7FF else value
+
+
 class InfoFlag(IntFlag):
     BLE_AVAILABLE = 0x01
     BLE_CONNECTED = 0x02
@@ -94,6 +113,12 @@ class InfoFlag(IntFlag):
     PIDS_KNOWN = 0x10
 
 
+# CAN IDs are u32; bit 31 marks a 29-bit ID (as in Linux SocketCAN)
+CAN_ID_EXT = 0x80000000
+CAN_ID_EXT_MASK = 0x1FFFFFFF
+
+# the vehicle's OBD broadcast: the device sends it on 0x7DF or 0x18DB33F1,
+# whichever addressing the vehicle uses (Info.obd_addressing)
 OBD_ID_BROADCAST = 0x7DF
 OBD_ID_ENGINE = 0x7E0
 OBD_NEGATIVE_RESPONSE = 0x7F
@@ -118,6 +143,7 @@ class Info:
     uid: tuple[int, int, int]
     ble_mac: str
     flags: InfoFlag
+    obd_addressing: ObdAddressing | int
     ble_passkey: int
 
     _FORMAT = "<8BI3I6sBBI"
@@ -125,7 +151,7 @@ class Info:
     @classmethod
     def parse(cls, payload: bytes) -> "Info":
         (proto, major, minor, patch, hwconf, reset, fault, can, fault_info,
-         uid0, uid1, uid2, mac, flags, _reserved, passkey) = struct.unpack(cls._FORMAT, payload)
+         uid0, uid1, uid2, mac, flags, addressing, passkey) = struct.unpack(cls._FORMAT, payload)
         return cls(
             proto_version=proto,
             fw_version=(major, minor, patch),
@@ -137,6 +163,7 @@ class Info:
             uid=(uid0, uid1, uid2),
             ble_mac=":".join(f"{b:02X}" for b in mac),
             flags=InfoFlag(flags),
+            obd_addressing=_enum_or_int(ObdAddressing, addressing),
             ble_passkey=passkey,
         )
 
@@ -170,7 +197,7 @@ class CanStats:
 @dataclass(frozen=True)
 class ObdResponse:
     """One ECU's answer to an OBD request."""
-    ecu_id: int
+    ecu_id: int         # the CAN ID it answered on (CAN_ID_EXT set for 29-bit)
     message: bytes      # starts with the response SID (request SID + 0x40), or 0x7F SID NRC
 
     @property
@@ -185,11 +212,10 @@ class ObdResponse:
 def parse_obd_records(payload: bytes) -> list[ObdResponse]:
     responses = []
     pos = 0
-    while pos + 3 <= len(payload):
-        ecu_id = payload[pos] | (payload[pos + 1] << 8)
-        length = payload[pos + 2]
-        responses.append(ObdResponse(ecu_id, payload[pos + 3:pos + 3 + length]))
-        pos += 3 + length
+    while pos + 5 <= len(payload):
+        ecu_id, length = struct.unpack_from("<IB", payload, pos)
+        responses.append(ObdResponse(ecu_id, payload[pos + 5:pos + 5 + length]))
+        pos += 5 + length
     return responses
 
 

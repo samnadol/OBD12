@@ -8,7 +8,7 @@ import sys
 
 from . import pids
 from .client import Device, DeviceError
-from .protocol import InfoFlag, Topic
+from .protocol import InfoFlag, Topic, format_can_id, parse_can_id
 from .transports import BleTransport, UsbTransport
 
 DEFAULT_LIVE_PIDS = "0C,0D,05,0F,11"
@@ -38,6 +38,7 @@ async def cmd_info(dev: Device, args) -> None:
     fault = getattr(info.last_fault, 'name', info.last_fault)
     print(f"last fault    {fault}" + (f" (0x{info.last_fault_info:08X})" if info.last_fault_info else ""))
     print(f"CAN state     {getattr(info.can_state, 'name', info.can_state)}")
+    print(f"OBD address   {getattr(info.obd_addressing, 'name', info.obd_addressing)}")
     if any(info.uid):
         print(f"UID           {''.join(f'{w:08X}' for w in info.uid)}")
     print(f"BLE address   {info.ble_mac}")
@@ -64,9 +65,9 @@ async def cmd_vin(dev: Device, args) -> None:
 
 async def cmd_obd(dev: Device, args) -> None:
     data = bytes(parse_hex_list(args.request))
-    for r in await dev.obd_request(data, dest=int(args.dest, 16)):
+    for r in await dev.obd_request(data, dest=parse_can_id(args.dest)):
         status = f"negative, NRC 0x{r.nrc:02X}" if r.negative else "ok"
-        print(f"0x{r.ecu_id:03X}: {r.message.hex(' ').upper()}  ({status})")
+        print(f"{format_can_id(r.ecu_id)}: {r.message.hex(' ').upper()}  ({status})")
 
 
 async def supported_data_pids(dev: Device) -> list[int]:
@@ -158,7 +159,9 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name, help=help_text)
         if name == "obd":
             p.add_argument("request", help="request bytes in hex, e.g. 01,0C")
-            p.add_argument("--dest", default="7DF", help="destination CAN ID in hex (default 7DF, broadcast)")
+            p.add_argument("--dest", default="7DF",
+                           help="destination CAN ID in hex: 7DF (default) is the vehicle's OBD broadcast, 11- or 29-bit; "
+                                "7E0-7E7, or 29-bit 18DB33F1 / 18DAxxF1")
         elif name == "live":
             p.add_argument("--pids", default=DEFAULT_LIVE_PIDS,
                            help=f"mode 01 PIDs in hex, or 'supported' for all the vehicle supports (default {DEFAULT_LIVE_PIDS})")

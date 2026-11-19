@@ -5,10 +5,17 @@
  * sent one at a time; responses from every ECU that answers within the
  * response window are collected and handed back as a list of records:
  *
- *   record = [ecu_id u16 LE][len u8][response message, len bytes]
+ *   record = [ecu_id u32 LE][len u8][response message, len bytes]
  *
- * where the response message starts with the response service ID
+ * where ecu_id is the CAN ID the ECU answered on (CAN_ID_EXT set for 29-bit
+ * IDs) and the response message starts with the response service ID
  * (e.g. 0x41 ...) or 0x7F for a negative response.
+ *
+ * OBD_ID_BROADCAST stands for the vehicle's OBD functional address: 0x7DF on
+ * 11-bit vehicles, 0x18DB33F1 on 29-bit ones. Until a vehicle has answered,
+ * a broadcast nobody answers on 0x7DF is sent again on 0x18DB33F1 (ISO
+ * 15765-4 initialisation); the first answer decides the addressing, which is
+ * then kept while powered.
  */
 
 #ifndef OBD_H_
@@ -19,6 +26,8 @@
 
 #define OBD_ID_BROADCAST 0x7DF
 #define OBD_ID_ENGINE    0x7E0
+
+#define OBD_RECORD_HEADER 5     // ecu_id u32, len u8
 
 #define OBD_RESPONSE_WINDOW_MS   50     // P2_CAN, ISO 15765-4
 #define OBD_RESPONSE_PENDING_MS  5000   // P2*_CAN, after NRC 0x78
@@ -68,6 +77,13 @@ typedef enum
 
 typedef enum
 {
+	OBD_ADDRESSING_UNKNOWN = 0, // no vehicle has answered yet
+	OBD_ADDRESSING_11BIT = 1,
+	OBD_ADDRESSING_29BIT = 2,
+} obd_addressing_t;
+
+typedef enum
+{
 	OBD_KIND_HOST = 0,          // raw request from a host, result goes to OBD_OnRequestDone()
 	OBD_KIND_HOST_VIN = 1,      // VIN request from a host, result goes to OBD_OnRequestDone()
 	OBD_KIND_LIVE = 2,          // internal: live data polling
@@ -77,7 +93,7 @@ typedef enum
 
 typedef struct
 {
-	uint16_t dest;              // 0x7DF (broadcast) or 0x7E0-0x7E7 (physical)
+	uint32_t dest;              // OBD_ID_BROADCAST, or an ISO 15765-4 request ID (see ISOTP.h)
 	uint8_t len;                // request length, 1-7
 	uint8_t data[7];            // service ID, PID(s)
 	uint8_t kind;               // obd_kind_t
@@ -90,6 +106,8 @@ void OBD_Process(void);
 
 // false if the queue is full
 bool OBD_Submit(const obd_request_t *req);
+
+obd_addressing_t OBD_GetAddressing(void);
 
 // true (and copies 17 characters) once the VIN is known
 bool OBD_GetVin(char vin[17]);

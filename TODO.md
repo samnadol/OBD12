@@ -9,15 +9,16 @@ Work planned from the "OEM diagnostics and OTA firmware updates" report (Nov 202
 
 ## 1. Vehicle coverage: CAN addressing (firmware)
 
-- [ ] Enable extended (29-bit) receive filters; the FDCAN config has `ExtFiltersNbr=0`
-- [ ] 29-bit ISO-TP: normal-fixed addressing (`0x18DAxxF1` / `0x18DAF1xx`), functional `0x18DB33F1`, flow control to `0x18DAxxF1`
+- [x] Enable extended (29-bit) receive filters (`0x18DAF1xx`, `ExtFiltersNbr=1`)
+- [x] 29-bit ISO-TP: normal-fixed addressing (`0x18DAxxF1` / `0x18DAF1xx`), functional `0x18DB33F1`, flow control to `0x18DAxxF1`; protocol v3 carries u32 CAN IDs
 - [ ] Accept GM Global B responses on `0x142AF1xx` (requests `0x14DAxxF1`, priority `0x14`)
-- [ ] ISO 15765-4 detection at connect: 500k 11-bit (`0x7DF`), then 500k 29-bit (`0x18DB33F1`), then 250k; record every responder; cache the result per VIN
+- [x] Addressing detection at 500k: an unanswered `0x7DF` broadcast is resent on `0x18DB33F1` until a vehicle answers; kept while powered, reported in `GET_INFO`
+- [ ] 250 kbit/s detection; record every responder; cache the result per VIN instead of per power-up
 - [ ] Listen-only bit-rate probe before transmitting on an unknown bus
-- [ ] Drain FDCAN FIFOs in the ISR so multi-responder replies (e.g. Honda's ~15 modules on `18DBEFF1`) aren't dropped
+- [ ] Check multi-responder bursts (e.g. Honda's ~15 modules on `18DBEFF1`) against the 3-element RX FIFO on a real car; the RX interrupt already drains the FIFO
 - [ ] Generic request descriptor: `{29-bit flag, tx_id, rx_id or mask, ext_addr_tx, ext_addr_rx, fc_mode, timeout_ms, pad_byte}`, matching OBDb's `hdr/rax/eax/tst/pri/tmo/fcm1`; never assume rx = tx + 8
 - [ ] Extended addressing (Toyota `0x750/0x758`): target byte on every frame including our flow control, filter on ID + target byte, 6-byte single frames, one target at a time
-- [ ] NRC 0x78 (response pending): extend the wait to ~5 s in firmware
+- [x] NRC 0x78 (response pending): extend the wait to ~5 s in firmware
 - [ ] Reassembly buffers ≥ 256 B (Honda block DIDs exceed 160 B)
 - [ ] Per-request timeouts (≥ 600 ms for Toyota `0x750` targets) and padding (0x00 default; 0x55/0xAA seen)
 - [ ] Read-only service allow-list: allow J1979 0x01–0x0A, `0x10` (01/03 only), `0x19`, `0x1A`, `0x21`, `0x22`, `0x3E`, GMLAN `$A9`/`$AA`; DTC clear (`0x14`, `0x04`) only behind explicit user confirmation; block `0x27`, `0x29`, `0x2E`, `0x2F`, `0x31`, `0x34–0x37`, `0x3D`, `0x11`, `0x28`

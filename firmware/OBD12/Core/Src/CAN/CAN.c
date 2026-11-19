@@ -48,7 +48,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 		if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &header, frame.data) != HAL_OK)
 			break;
 
-		frame.id = header.Identifier;
+		frame.id = header.Identifier | (header.IdType == FDCAN_EXTENDED_ID ? CAN_ID_EXT : 0);
 		frame.dlc = header.DataLength > 8 ? 8 : (uint8_t) header.DataLength;
 
 		if (ring_push(&rx_ring, &frame))
@@ -112,6 +112,16 @@ void CAN_Config(FDCAN_HandleTypeDef *hfdcan)
 	if (HAL_FDCAN_ConfigFilter(hfdcan, &filter) != HAL_OK)
 		Error_Handler();
 
+	// 29-bit: the extended filter list has its own indices (ExtFiltersNbr >= 1)
+	filter.IdType = FDCAN_EXTENDED_ID;
+	filter.FilterIndex = 0;
+	filter.FilterType = FDCAN_FILTER_MASK;
+	filter.FilterID1 = CAN_ID_RESPONSE_29 & CAN_ID_EXT_MASK;
+	filter.FilterID2 = CAN_ID_RESPONSE_29_MASK;
+
+	if (HAL_FDCAN_ConfigFilter(hfdcan, &filter) != HAL_OK)
+		Error_Handler();
+
 	if (HAL_FDCAN_ConfigGlobalFilter(hfdcan, FDCAN_REJECT, FDCAN_REJECT, FDCAN_REJECT_REMOTE, FDCAN_REJECT_REMOTE) != HAL_OK)
 		Error_Handler();
 
@@ -166,7 +176,7 @@ void CAN_Process(void)
 	}
 }
 
-bool CAN_Tx(uint16_t identifier, const uint8_t data[8])
+bool CAN_Tx(uint32_t id, const uint8_t data[8])
 {
 	if (state == CAN_STATE_BUS_OFF || state == CAN_STATE_NOT_STARTED)
 	{
@@ -175,8 +185,8 @@ bool CAN_Tx(uint16_t identifier, const uint8_t data[8])
 	}
 
 	FDCAN_TxHeaderTypeDef header = { 0 };
-	header.Identifier = identifier;
-	header.IdType = FDCAN_STANDARD_ID;
+	header.Identifier = id & CAN_ID_EXT_MASK;
+	header.IdType = (id & CAN_ID_EXT) ? FDCAN_EXTENDED_ID : FDCAN_STANDARD_ID;
 	header.TxFrameType = FDCAN_DATA_FRAME;
 	header.DataLength = FDCAN_DLC_BYTES_8;
 	header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
