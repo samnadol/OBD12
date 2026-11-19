@@ -89,9 +89,12 @@ static bool tx_id_permitted(uint32_t id)
 {
 	if (id & CAN_ID_EXT)
 	{
-		// ISO 15765-2 normal fixed addressing: PF 0xDA physical, 0xDB functional
+		id &= CAN_ID_EXT_MASK;
+		// ISO 15765-2 normal fixed addressing: PF 0xDA physical, 0xDB functional (any priority)
 		uint8_t pf = (uint8_t) (id >> 16);
-		return pf == 0xDA || pf == 0xDB;
+		return pf == 0xDA || pf == 0xDB
+				|| (id & 0x1FFFFF00u) == 0x17FC0000u    // VW group (MQB/MEB): 0x17FC00xx, answers on 0x17FE00xx
+				|| (id & 0x1FFF0000u) == 0x1DD00000u;   // Volvo / Polestar: 0x1DD0xxxx
 	}
 	return id >= 0x600                      // ISO 15765-4 (0x7DF, 0x7E0-0x7E7) and manufacturer diagnostic IDs
 			|| (id >= 0x240 && id <= 0x25F) // GMLAN USDT physical requests

@@ -121,7 +121,12 @@ Records that would not fit the 512-byte payload are dropped. No answer at all gi
 | J1979 `04` and UDS/KWP `14` clear DTCs, J1979 `08` on-board tests | on authorized links only |
 | everything else: writes, security access, routines, I/O control, ECU reset, communication control, downloads, programming sessions | never |
 
-`tx_id` must be a diagnostic ID: 11-bit `0x600`–`0x7FF`, GMLAN `0x101` and `0x240`–`0x25F`, or 29-bit `xxDAxxxx` / `xxDBxxxx` (ISO 15765-2 normal fixed addressing). The device never sends on other IDs, where modules would read the frame as normal bus traffic.
+`tx_id` must be a diagnostic ID. The device never sends on other IDs, where modules would read the frame as normal bus traffic:
+
+- 11-bit `0x600`–`0x7FF`, and GMLAN `0x101` and `0x240`–`0x25F`
+- 29-bit `xxDAxxxx` / `xxDBxxxx` (ISO 15765-2 normal fixed addressing, any priority)
+- 29-bit `17FC00xx` (VW group; answers on `17FE00xx`)
+- 29-bit `1DD0xxxx` (Volvo, Polestar)
 
 ### GET_VIN and GET_SUPPORTED_PIDS
 

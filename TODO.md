@@ -13,7 +13,7 @@ Work planned from the "OEM diagnostics and OTA firmware updates" report (Nov 202
 - [x] 29-bit ISO-TP: normal-fixed addressing (`0x18DAxxF1` / `0x18DAF1xx`), functional `0x18DB33F1`, flow control to `0x18DAxxF1`; protocol v3 carries u32 CAN IDs
 - [x] Accept GM Global B responses on `0x142AF1xx` (requests `0x14DAxxF1`, priority `0x14`): a `DIAG_REQUEST` with `rx_id` `0x142AF1xx`
 - [x] Addressing detection at 500k: an unanswered `0x7DF` broadcast is resent on `0x18DB33F1` until a vehicle answers; kept while powered, reported in `GET_INFO`
-- [ ] 250 kbit/s detection; record every responder; cache the result per VIN instead of per power-up
+- [ ] 250 kbit/s detection: when neither `0x7DF` nor `0x18DB33F1` gets an answer at 500k, retry both at 250k (ISO 15765-4 order). Detection costs ~100–200 ms per power-up, so no per-VIN cache (reading the VIN needs the bit rate and addressing first anyway)
 - [ ] Listen-only bit-rate probe before transmitting on an unknown bus
 - [ ] Check multi-responder bursts (e.g. Honda's ~15 modules on `18DBEFF1`) against the 3-element RX FIFO on a real car; the RX interrupt already drains the FIFO
 - [x] Generic request descriptor: `DIAG_REQUEST` (protocol v4) replaces `OBD_REQUEST`: `{flags, tx_id, rx_id, rx_mask, tx_ext, rx_ext, pad, timeout_ms}`, matching OBDb's `hdr/rax/eax/tmo`; a spare FDCAN filter per ID type follows `rx_id`/`rx_mask`
@@ -21,9 +21,11 @@ Work planned from the "OEM diagnostics and OTA firmware updates" report (Nov 202
 - [x] NRC 0x78 (response pending): extend the wait to ~5 s in firmware
 - [x] Reassembly buffers ≥ 256 B (Honda block DIDs exceed 160 B); records carry a u16 length, protocol payload up to 512 B
 - [x] Per-request timeouts (≥ 600 ms for Toyota `0x750` targets) and padding (0x00 default; 0x55/0xAA seen)
-- [x] Read-only service allow-list: J1979 reads, `0x10` (01/03 only), `0x19`, `0x1A`, `0x21`, `0x22`, `0x3E`, GMLAN `$A9`/`$AA`; DTC clear (`0x04`, `0x14`) and J1979 `0x08` on authorized links only; everything else `ERR_NOT_PERMITTED`. `tx_id` limited to diagnostic IDs (11-bit `0x600–0x7FF`, GMLAN `0x101`/`0x240–0x25F`, 29-bit PF `0xDA`/`0xDB`)
+- [x] Read-only service allow-list: J1979 reads, `0x10` (01/03 only), `0x19`, `0x1A`, `0x21`, `0x22`, `0x3E`, GMLAN `$A9`/`$AA`; DTC clear (`0x04`, `0x14`) and J1979 `0x08` on authorized links only; everything else `ERR_NOT_PERMITTED`. `tx_id` limited to diagnostic IDs (11-bit `0x600–0x7FF`, GMLAN `0x101`/`0x240–0x25F`, 29-bit PF `0xDA`/`0xDB`, VW group `0x17FC00xx`, Volvo/Polestar `0x1DD0xxxx`; checked against the request IDs in OBDb)
 - [ ] Apps: ask for explicit confirmation before sending a DTC clear
 - [ ] Multi-frame requests (UDS `0x22` with several DIDs, GMLAN `$AA` with many DPIDs exceed 7 bytes)
+- [ ] Functional requests to non-ISO 15765-4 IDs: flow control currently goes to the ISO 15765-4 request ID of each responder, which is wrong for e.g. GM `0x14DB…` broadcasts with multi-frame answers
+- [ ] Optional: VW TP 2.0 transport (channel setup on `0x200`) for older VW group modules (roughly pre-2012); until then those cars get generic OBD only
 - [ ] GM UUDT raw-frame sink for `$A9` DTC reports and `$AA` periodic data (single frames without ISO-TP PCI on `0x541–0x55F` / `0x5E8–0x5EF`); background `$3E` while streaming (2–3 d)
 - [ ] Optional: OVMS-style firmware poll scheduler (app pushes `{tx, rx, eax, service, id, interval}`; ~2.5 KB RAM for 210 commands)
 
@@ -34,8 +36,12 @@ Work planned from the "OEM diagnostics and OTA firmware updates" report (Nov 202
 - [ ] Treat NRC 0x33, 0x34, 0x22 and 0x7F as "restricted by the manufacturer" and never retry
 - [ ] J1979-2 (OBDonUDS) fallback: `22 F400` when `01 00` gets no answer; `22 F4xx` / `22 F8xx` mapping; 3-byte DTCs via `0x19`
 - [ ] OBDb ingestion:
-  - [ ] GitHub Action that builds a make/model/year index (avoids browser API rate limits)
-  - [ ] VIN to make/year, user confirms the model
+  - [ ] GitHub Action that builds a make/model/year index (avoids browser API rate limits): repo names (`Make-Model`), plus the generations in each repo's `.gen.yaml`
+  - [ ] Match corgi's make/model to a repo: normalise case and punctuation, alias table for makes (`MERCEDES-BENZ` → `Mercedes-Benz`/`Mercedes`, `LAND ROVER` → `Land-Rover`/`Landrover`, `VOLKSWAGEN` → `Volkswagen`/`VW`, `Fiat`/`FIAT`, `Seat`/`SEAT`, `Smart`/`smart`, Vauxhall/Opel → `VauxhallOpel`, Nissan/Infiniti → `NissanInfiniti`), the VIN's fuel type to pick `-Hybrid` / `-Electric` / `-Lightning` / `-Prime` / `-Energi` repos, variant repos (`Mercedes-Benz-C200d`)
+  - [ ] Show the best matches, the user confirms; remember the choice per VIN; no match → `SAEJ1979` only
+  - [ ] Apply each command's year filters (`filter` / `dbgfilter`: `from`, `to`, `years`); skip `dbg` commands
+  - [ ] Map OBDb commands to `DIAG_REQUEST` targets: `hdr` + `pri` + `tst` → `tx_id` (29-bit: `pri` (default `18`), `hdr`, `tst` (default `F1`)), `rax` → `rx_id` (3 hex digits: 11-bit ID; 2: `18DAF1` + `rax`; 6: `pri` + `rax`; 8: the full ID; none: the ISO 15765-4 response ID), `eax` → `tx_ext`, `tmo` → `timeout_ms` (check the units against OBDb's schema), `fcm1` → flow control to `tx_id` (already the default for physical requests)
+  - [ ] Per-make answer address byte for extended addressing: BMW answers with `F1`, Toyota with the target byte; OBDb only gives `eax`
   - [ ] Fetch `SAEJ1979`, then the make file, then the model file from jsDelivr pinned to a commit SHA
   - [ ] Cache in IndexedDB
   - [ ] Show OBDb's CC BY-SA 4.0 attribution string (About screen)
@@ -44,6 +50,15 @@ Work planned from the "OEM diagnostics and OTA firmware updates" report (Nov 202
   - [ ] Toyota: `0x750` extended-address sweep; KWP `0x13` read / `0x04` clear on older ECUs; UDS DTC requests to be probed and verified on real cars
   - [ ] Honda: functional `02 3E 00` on `18DBEFF1`, collect `7E 00` replies; `19 02 08` read, `14 FF FF FF` clear; probe PGM-FI at `0x10`, `0x11` and `0x0E`
   - [ ] GM: probe `7E0` and `DA11`; Global A `$A9`/`$04`; Global B DTC service still unconfirmed
+  - [ ] VW / Audi / Skoda / Seat / Cupra: modules on `0x7xx` answering at request + `0x6A` (`710`→`77A`, `713`→`77D`, `714`→`77E`), engine `7E0`→`7E8`; newer platforms (MQB-evo, MEB) also 29-bit `17FC00xx` → `17FE00xx`; UDS `19 02` read, `14 FF FF FF` clear; gateway (SFD) on 2020+ cars likely refuses clears
+  - [ ] Ford / Lincoln / Mazda: modules at `7xx` → `+8` (PCM `7E0`, BCM `726`, IPC `720`, ABS `760`, gateway `716`); UDS `19 02` on 2009+, KWP `0x18` read on older Ford; many body modules are on MS-CAN (pins 3/11, section 6)
+  - [ ] BMW / MINI: everything through `6F1` with the module address as `tx_ext`, answers on `0x600 + address` with `F1` as the address byte; sweep addresses; UDS `19 02`
+  - [ ] Hyundai / Kia / Genesis: modules at `7xx` → `+8` (BMS `7E4`→`7EC`, `7A0`, `770`), KWP `0x21` on older ECUs; UDS `19 02`; some 2020+ models have a security gateway
+  - [ ] Stellantis (Jeep / Ram / Dodge / Chrysler / Fiat): IDs from OBDb (`740`→`4C0`, `7AB`→`52B`; 29-bit `18DAxxF1` on newer Ram); 2018+ Secure Gateway allows reads but rejects clears (NRC `0x33`) without an AutoAuth login: explain it in the app instead of retrying
+  - [ ] Nissan / Infiniti: IDs from OBDb (Leaf `79B`→`7BB`, `797`→`79A`, `743`→`763`); KWP `0x21` on older ECUs
+  - [ ] Volvo / Polestar: 29-bit `1DD0xxxx` requests with answers on `1EC6xxxx`-style IDs from OBDb; DTC service to be confirmed
+  - [ ] Mercedes, Subaru, Renault, Peugeot / Citroen: data from OBDb only (Subaru `7B0`, Renault `18DAxxF1`, Peugeot `6A8`→`688`); DTC services to be confirmed
+  - [ ] Treat a make with no OBDb entry as generic OBD-II only (e.g. Tesla, whose OBDb set is empty)
 
 ## 3. BLE GATT cleanup
 
