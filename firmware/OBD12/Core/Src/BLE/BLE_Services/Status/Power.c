@@ -4,7 +4,7 @@
  *  Created on: Aug 8, 2025
  *      Author: samna
  *
- * Value: proto_power_t (6 bytes, little-endian), see Comms/protocol.h.
+ * Value: proto_power_t (4 bytes), see Comms/protocol.h.
  */
 
 #include <BLE/BLE_Services/Status/Power.h>

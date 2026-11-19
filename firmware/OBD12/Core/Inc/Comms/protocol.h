@@ -24,7 +24,7 @@
 
 #include <stdint.h>
 
-#define PROTO_VERSION 1
+#define PROTO_VERSION 2
 
 #define PROTO_HEADER_LEN   3
 #define PROTO_CRC_LEN      2
@@ -120,10 +120,10 @@ typedef struct __attribute__((packed))
 
 typedef struct __attribute__((packed))
 {
-	uint8_t usb_regulator_ok;   // USB_REG_ST pin
-	uint8_t can_regulator_ok;   // CAN_REG_ST pin
-	uint16_t usb_regulator_mv;
-	uint16_t can_regulator_mv;
+	uint8_t usb_reg_st;         // USB_REG_ST pin: LM66100 status of the USB path
+	uint8_t can_reg_st;         // CAN_REG_ST pin: LM66100 status of the vehicle path
+	uint8_t usb_reg_out;        // USB_REG_OUT pin: the USB regulator output is up
+	uint8_t can_reg_out;        // CAN_REG_OUT pin: the vehicle regulator output is up
 } proto_power_t;
 
 typedef struct __attribute__((packed))

@@ -219,12 +219,11 @@ export function parseInfo(p) {
 }
 
 export function parsePower(p) {
-	const v = view(p);
 	return {
-		usbRegulatorOk: !!p[0],
-		canRegulatorOk: !!p[1],
-		usbRegulatorMv: v.getUint16(2, true),
-		canRegulatorMv: v.getUint16(4, true),
+		usbRegSt: !!p[0],       // LM66100 status pin of the USB path
+		canRegSt: !!p[1],       // LM66100 status pin of the vehicle path
+		usbRegOut: !!p[2],      // the USB regulator output is up
+		canRegOut: !!p[3],      // the vehicle regulator output is up
 	};
 }
 

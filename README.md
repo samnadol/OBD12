@@ -60,7 +60,7 @@ Pushes to `master` that touch `software/web/` publish it to GitHub Pages (`.gith
 
 - No output capacitor directly on the USB LDO output (`USB_REG_OUT`).
 - The power priority logic depends on LM66100 `ST` polarity. Check that 3.3 V stays up with USB and 12 V both connected.
-- The ADC reads the regulator outputs without a divider, so the readings sit near full scale. They only work as presence detection.
+- The regulator outputs (PA6, PA7) go to the MCU without a divider and are read as digital inputs, so the firmware sees whether each supply is up, not its voltage. Nothing measures the vehicle's 12 V.
 - Check that C23 on the 12 V rail is rated for at least 25 V.
 - R10/R11 (60 Ω) drive the FT230X LEDs harder than the CBUS default.
 - When running on 12 V only, PA9 back-powers the unpowered FT230X.

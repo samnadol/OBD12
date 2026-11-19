@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 
-PROTO_VERSION = 1
+PROTO_VERSION = 2
 
 
 class FrameType(IntEnum):
@@ -143,15 +143,14 @@ class Info:
 
 @dataclass(frozen=True)
 class Power:
-    usb_regulator_ok: bool
-    can_regulator_ok: bool
-    usb_regulator_mv: int
-    can_regulator_mv: int
+    usb_reg_st: bool    # LM66100 status pin of the USB path
+    can_reg_st: bool    # LM66100 status pin of the vehicle path
+    usb_reg_out: bool   # the USB regulator output is up
+    can_reg_out: bool   # the vehicle regulator output is up
 
     @classmethod
     def parse(cls, payload: bytes) -> "Power":
-        usb_ok, can_ok, usb_mv, can_mv = struct.unpack("<BBHH", payload)
-        return cls(bool(usb_ok), bool(can_ok), usb_mv, can_mv)
+        return cls(*(bool(b) for b in struct.unpack("<BBBB", payload)))
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-# OBD12 host protocol (version 1)
+# OBD12 host protocol (version 2)
 
 The same protocol runs over the USB serial port (115200 8N1) and the BLE Nordic UART service. The source of truth is `firmware/OBD12/Core/Inc/Comms/protocol.h` and `software/obd12/protocol.py` mirrors it.
 
@@ -50,7 +50,7 @@ Every REQ gets exactly one RSP or ERR with the same `seq` and `id`. Requests may
 |---|---|---|---|---|
 | `0x01` | PING | any bytes | the same bytes | |
 | `0x02` | GET_INFO | – | `info` (36 bytes, below) | |
-| `0x03` | GET_POWER | – | `power` (6 bytes, below) | |
+| `0x03` | GET_POWER | – | `power` (4 bytes, below) | |
 | `0x04` | SET_EVENTS | `topics u8` | – | |
 | `0x05` | GET_CAN_STATS | – | 6 × `u32`: rx_frames, rx_dropped, tx_frames, tx_failed, bus_off_count, transceiver_faults | |
 | `0x06` | RESET | – | – (the device reboots after the answer) | yes |
@@ -146,13 +146,15 @@ Topics for `SET_EVENTS` are bit flags: `0x01` LOG, `0x02` POWER, `0x04` CAN_STAT
 | 31 | u8 | reserved |
 | 32 | u32 | BLE passkey (USB only, otherwise 0) |
 
-### power (GET_POWER, EVT_POWER, BLE Power characteristic; 6 bytes)
+### power (GET_POWER, EVT_POWER, BLE Power characteristic; 4 bytes)
+
+Each field is a pin level, 1 = high.
 
 | Offset | Type | Field |
 |---|---|---|
-| 0 | u8 | USB regulator status pin (`USB_REG_ST`) |
-| 1 | u8 | CAN regulator status pin (`CAN_REG_ST`) |
-| 2 | u16 | USB regulator output, mV |
-| 4 | u16 | CAN regulator output, mV |
+| 0 | u8 | `USB_REG_ST`: LM66100 status pin of the USB supply path |
+| 1 | u8 | `CAN_REG_ST`: LM66100 status pin of the vehicle supply path |
+| 2 | u8 | `USB_REG_OUT`: the USB regulator output is up |
+| 3 | u8 | `CAN_REG_OUT`: the vehicle regulator output is up |
 
-The voltages are measured against VDDA (the +3V3 rail), so on the current hardware they read at or near full scale. See README design note 3.
+Version 1 sent 6 bytes with the regulator outputs in mV. Those readings were taken against VDDA, the +3V3 rail the regulators feed, so they could only show up or down.

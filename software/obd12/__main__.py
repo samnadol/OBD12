@@ -49,8 +49,8 @@ async def cmd_info(dev: Device, args) -> None:
 
 async def cmd_power(dev: Device, args) -> None:
     p = await dev.get_power()
-    print(f"USB regulator  {'ok ' if p.usb_regulator_ok else 'off'}  {p.usb_regulator_mv} mV")
-    print(f"CAN regulator  {'ok ' if p.can_regulator_ok else 'off'}  {p.can_regulator_mv} mV")
+    print(f"USB regulator  output {'up  ' if p.usb_reg_out else 'down'}  ST {'high' if p.usb_reg_st else 'low'}")
+    print(f"CAN regulator  output {'up  ' if p.can_reg_out else 'down'}  ST {'high' if p.can_reg_st else 'low'}")
 
 
 async def cmd_can_stats(dev: Device, args) -> None:
@@ -133,7 +133,7 @@ async def cmd_clear_bonds(dev: Device, args) -> None:
 
 COMMANDS = {
     "info": (cmd_info, "device information (the BLE passkey is only shown over USB)"),
-    "power": (cmd_power, "regulator status and voltages"),
+    "power": (cmd_power, "regulator outputs and status pins"),
     "can-stats": (cmd_can_stats, "CAN controller counters"),
     "vin": (cmd_vin, "vehicle identification number"),
     "pids": (cmd_pids, "mode 01 PIDs the vehicle supports"),

@@ -19,7 +19,6 @@ static uint32_t last_rx_frames;
 
 void status_init(void)
 {
-	power_init();
 	HAL_GPIO_WritePin(STATUS_LED_1_GPIO_Port, STATUS_LED_1_Pin, GPIO_PIN_SET);
 }
 
